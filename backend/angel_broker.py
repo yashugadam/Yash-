@@ -107,6 +107,28 @@ class AngelBroker:
             logger.warning("get_ltp failed: %s", e)
         return None
 
+    def get_history(self, interval, from_dt, to_dt):
+        """Fetch historical candles. from_dt/to_dt format: 'YYYY-MM-DD HH:MM'.
+        Returns list of [timestamp, open, high, low, close, volume]."""
+        if not self.connected or not self.fut_token:
+            return None
+        try:
+            params = {
+                "exchange": "NFO",
+                "symboltoken": self.fut_token,
+                "interval": interval,
+                "fromdate": from_dt,
+                "todate": to_dt,
+            }
+            res = self.smart.getCandleData(params)
+            if res.get("status"):
+                return res.get("data") or []
+            self.error = str(res.get("message") or res)
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("get_history failed: %s", e)
+        return None
+
     def logout(self):
         try:
             if self.smart and self.client_code:

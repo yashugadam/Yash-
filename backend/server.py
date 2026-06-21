@@ -11,7 +11,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone, date, time as dtime
+from datetime import datetime, timezone, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 from angel_broker import AngelBroker
 
@@ -123,7 +123,7 @@ class TradingEngine:
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
     # a REVERSAL needs a 2x brick move (the first opposite brick prints only after 2 boxes).
-    def _feed_close(self, price):
+    def _feed_close(self, price, ts=None):
         bs = self.settings["brick_size"]
         formed = []
         if self.anchor is None:
@@ -146,16 +146,58 @@ class TradingEngine:
             c = self.anchor + s * bs
             self.anchor = c
             self.direction = s
-            formed.append(self._new_brick("green" if s > 0 else "red", o, c))
+            formed.append(self._new_brick("green" if s > 0 else "red", o, c, ts))
         return formed
 
-    def _new_brick(self, color, o, c):
+    # -------- historical backfill (real Angel One 1-min candles) --------
+    async def load_history(self, days=5):
+        if not self.broker.connected:
+            return {"ok": False, "error": "Connect Angel One first."}
+        now = datetime.now(IST)
+        to_dt = now.strftime("%Y-%m-%d %H:%M")
+        from_dt = (now - timedelta(days=days)).strftime("%Y-%m-%d 09:15")
+        candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE", from_dt, to_dt)
+        if candles is None:
+            return {"ok": False, "error": self.broker.error or "History fetch failed"}
+        # rebuild the renko chart from real candle closes (no strategy/orders on history)
+        self.anchor = None
+        self.direction = 0
+        self.bricks = []
+        self.brick_seq = 0
+        last_close = None
+        for c in candles:
+            ts = c[0]
+            close = float(c[4])
+            last_close = close
+            self._feed_close(close, ts)
+        if last_close is not None:
+            self.price = self.prev_price = last_close
+        self.ticks_in_bar = 0
+        # resync consecutive-brick counters from the tail; flat after history load
+        self.consec_red = self.consec_green = self.down_run_reds = 0
+        if self.bricks:
+            last_color = self.bricks[-1]["color"]
+            run = 0
+            for b in reversed(self.bricks):
+                if b["color"] == last_color:
+                    run += 1
+                else:
+                    break
+            if last_color == "red":
+                self.consec_red = run
+            else:
+                self.consec_green = run
+        await self._persist_state()
+        return {"ok": True, "candles": len(candles), "bricks": len(self.bricks),
+                "from": from_dt, "to": to_dt, "symbol": self.broker.fut_symbol}
+
+    def _new_brick(self, color, o, c, ts=None):
         self.brick_seq += 1
         b = {"index": self.brick_seq, "color": color, "open": round(o, 2),
-             "close": round(c, 2), "time": now_iso(), "signal": None}
+             "close": round(c, 2), "time": ts or now_iso(), "signal": None}
         self.bricks.append(b)
-        if len(self.bricks) > 500:
-            self.bricks = self.bricks[-500:]
+        if len(self.bricks) > 1500:
+            self.bricks = self.bricks[-1500:]
         return b
 
     # -------- strategy --------
@@ -339,7 +381,7 @@ class TradingEngine:
             "_id": "singleton", "saved_at": now_iso(),
             "running": self.running, "price": self.price,
             "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
-            "bricks": self.bricks[-200:],
+            "bricks": self.bricks[-800:],
             "consec_red": self.consec_red, "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds, "position": self.position,
             "squared_off_date": self.squared_off_date,
@@ -465,7 +507,7 @@ class TradingEngine:
             "price": round(self.price, 2),
             "prev_price": round(self.prev_price, 2),
             "settings": self.settings,
-            "bricks": self.bricks[-60:],
+            "bricks": self.bricks[-400:],
             "position": self.position,
             "pending_entry": self.pending_entry,
             "pending_exit": self.pending_exit,
@@ -603,6 +645,13 @@ async def angel_disconnect():
     await asyncio.to_thread(engine.broker.logout)
     engine.feed_mode = "SIM"
     return {"connected": False, "feed_mode": "SIM"}
+
+
+@api_router.post("/angel/load-history")
+async def angel_load_history(body: dict = None):
+    days = int((body or {}).get("days", 5))
+    days = max(1, min(days, 20))
+    return await engine.load_history(days)
 
 
 @api_router.post("/feed/mode")

@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   Activity, Play, Square, RotateCcw, Settings as SettingsIcon, TrendingDown,
   Zap, ShieldCheck, ChevronUp, ChevronDown, Layers, Lock, Save,
-  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX,
+  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
 
@@ -106,6 +106,15 @@ export default function Dashboard() {
     poll();
   };
 
+  const loadHistory = async () => {
+    if (!state?.angel?.connected) { toast.error("Connect Angel One first to load history"); return; }
+    toast.info("Loading historical candles from Angel One…");
+    const { data } = await axios.post(`${API}/angel/load-history`, { days: 5 }, { timeout: 60000 });
+    if (data.ok) toast.success(`Loaded ${data.bricks} bricks from ${data.candles} candles`);
+    else toast.error(data.error || "History load failed");
+    poll();
+  };
+
   const squareOff = async () => {
     const { data } = await axios.post(`${API}/bot/square-off`);
     toast[data.ok ? "warning" : "info"](data.message);
@@ -181,6 +190,11 @@ export default function Dashboard() {
                   <button onClick={() => setFeedMode("LIVE")} data-testid="feed-live-btn"
                     className={`px-2 py-0.5 uppercase transition-colors ${state.feed_mode === "LIVE" ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-50"}`}>Live</button>
                 </div>
+                <button onClick={loadHistory} data-testid="load-history-btn"
+                  className="flex items-center gap-1 px-2 py-0.5 border border-slate-200 uppercase text-slate-500 hover:bg-slate-50 transition-colors disabled:opacity-40"
+                  disabled={!state.angel.connected} title={state.angel.connected ? "Load real 5-day history" : "Connect Angel One first"}>
+                  <History className="h-3 w-3" /> History
+                </button>
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-emerald-500 inline-block" /> Green</span>
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-red-500 inline-block" /> Red</span>
                 <span className="text-slate-400">Bar <b className="text-slate-700">{state.ticks_in_bar}/{state.settings.bar_seconds}s</b> · Reds <b className="text-slate-700">{state.consec_red}</b> · Greens <b className="text-slate-700">{state.consec_green}</b></span>
