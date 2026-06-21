@@ -40,7 +40,7 @@ class TradingEngine:
             "symbol": "NIFTY FUT",
             "brick_size": 50,
             "timeframe": "1m",
-            "bar_seconds": 5,              # bar length: brick is checked on each bar CLOSE (TradingView style). Live=60
+            "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
             "buffer_points": 5,            # SEBI-safe limit buffer (no market orders)
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
