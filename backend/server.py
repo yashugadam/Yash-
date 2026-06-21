@@ -69,7 +69,7 @@ class TradingEngine:
             "tick_interval": 1.0,
             "square_off_time": "15:20",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
-            "daily_max_loss": 5000,        # ₹: auto-stop the bot if day P&L falls to -this
+            "daily_max_loss": 10000,       # ₹: auto-stop the bot if day P&L falls to -this
             "circuit_breaker_enabled": True,
         }
         # runtime
@@ -410,6 +410,7 @@ class TradingEngine:
         return {
             "_id": "singleton", "saved_at": now_iso(),
             "running": self.running, "price": self.price,
+            "settings": self.settings,
             "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
             "bricks": self.bricks[-800:],
             "consec_red": self.consec_red, "consec_green": self.consec_green,
@@ -429,6 +430,8 @@ class TradingEngine:
         doc = await self.db.engine_state.find_one({"_id": "singleton"})
         if not doc:
             return
+        if doc.get("settings"):
+            self.settings.update(doc["settings"])
         self.anchor = doc.get("anchor")
         self.direction = doc.get("direction", 0)
         self.brick_seq = doc.get("brick_seq", 0)
