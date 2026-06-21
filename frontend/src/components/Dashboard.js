@@ -99,6 +99,13 @@ export default function Dashboard() {
     poll();
   };
 
+  const setFeedMode = async (mode) => {
+    const { data } = await axios.post(`${API}/feed/mode`, { feed_mode: mode });
+    if (data.ok) toast.success(`Feed: ${mode === "LIVE" ? "Live Angel One data" : "Simulated"}`);
+    else toast.error(data.error || "Could not switch feed");
+    poll();
+  };
+
   const squareOff = async () => {
     const { data } = await axios.post(`${API}/bot/square-off`);
     toast[data.ok ? "warning" : "info"](data.message);
@@ -168,6 +175,12 @@ export default function Dashboard() {
             icon={<Activity className="h-3.5 w-3.5 text-slate-500" />}
             right={
               <div className="flex items-center gap-3 font-mono text-[11px]">
+                <div className="flex items-center border border-slate-200" data-testid="feed-toggle">
+                  <button onClick={() => setFeedMode("SIM")} data-testid="feed-sim-btn"
+                    className={`px-2 py-0.5 uppercase transition-colors ${state.feed_mode === "SIM" ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}>Sim</button>
+                  <button onClick={() => setFeedMode("LIVE")} data-testid="feed-live-btn"
+                    className={`px-2 py-0.5 uppercase transition-colors ${state.feed_mode === "LIVE" ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-50"}`}>Live</button>
+                </div>
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-emerald-500 inline-block" /> Green</span>
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-red-500 inline-block" /> Red</span>
                 <span className="text-slate-400">Bar <b className="text-slate-700">{state.ticks_in_bar}/{state.settings.bar_seconds}s</b> · Reds <b className="text-slate-700">{state.consec_red}</b> · Greens <b className="text-slate-700">{state.consec_green}</b></span>
