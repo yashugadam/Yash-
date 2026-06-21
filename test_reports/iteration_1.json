@@ -1,0 +1,38 @@
+{
+  "summary": "Full backend + frontend testing of Renko Algo Trading Bot. Backend pytest suite (8 tests) all PASSED - covers /api/state snapshot, /api/bot/start price simulation, brick formation/colors, SHORT strategy entry with SELL LIMIT (ref-buffer), exit BUY LIMIT (ref+buffer), order retry to COMPLETE, pnl=(entry-exit)*65, /api/settings update, /api/angel/config staying DEMO, /api/bot/reset clearing state+trades. Frontend dashboard validated via Playwright: loads ticker, mode badge=Demo, START toggles status badge to Live, NIFTY price ticker updates in realtime, Renko chart SVG renders colored bricks, settings inputs disable while bot running and re-enable when stopped, Performance/Open-Position/Order-Book/Trade-Log cards present and data-bound, Angel-One inputs accept and save, Reset clears session (verified via toast 'Session reset — bricks & trades cleared').",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Header buttons (start-stop-button, reset-button)", "issue": "Top-right action buttons sit close to the sonner toast container. During automation, the toast overlay occasionally intercepted clicks (button text confirmed correct but next click sometimes did not trigger). Manual users likely unaffected but consider adding higher z-index on header or moving toasts to bottom-right.", "selector": "[data-testid=start-stop-button], [data-testid=reset-button]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Header", "issues": ["Status/mode badges and action buttons get partially clipped/overlapped by floating toast notifications at top-right on 1920px viewport"]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_renko_bot.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "(Optional) Move sonner Toaster position to bottom-right or raise header z-index to prevent toast from covering Start/Stop and Reset buttons.",
+    "(Optional) Consider seeding occasional downward bias or adding a 'force SHORT signal' debug button so reviewers can deterministically observe SHORT entry without waiting for random walk (backend tests already cover this; only relevant for manual demos)."
+  ],
+  "critical_code_review_comments": [
+    "server.py _process_brick: when pending_entry is true (waiting on SELL fill) and another red brick forms before fill, down_run_reds increments correctly. However if a GREEN brick prints between consec_red==2 trigger and the SELL fill, the strategy currently does not cancel/abort the entry; it will still open SHORT and could immediately need to exit. Consider an entry-invalidation step when consec_green>=1 while pending_entry.",
+    "server.py _execute_order uses random.random()<0.75 to simulate fill; retry path always succeeds on second attempt. Real-world should support multi-retry with max attempts and surface a final 'REJECTED' state.",
+    "server.py reset() does not call engine.load_metrics() itself; metrics are zeroed only because /api/bot/reset endpoint then calls load_metrics(). If reset() is invoked from elsewhere, metrics would not reload. Minor cohesion issue.",
+    "Single-file backend (~350 lines) acceptable now but TradingEngine should be split (engine.py, routes.py, models.py) before adding live Angel One integration.",
+    "Trade model lacks pydantic schema; relies on dict. Adding a Pydantic Trade model would prevent shape drift when persisted to Mongo.",
+    "Frontend Dashboard.js (~280 lines) is fine but the polling uses two setInterval timers; consider a single ws/SSE stream once load grows.",
+    "RenkoChart.js fixed width W=1100 may overflow on smaller laptops; relies on parent overflow-x-auto. OK."
+  ],
+  "updated_files": ["/app/backend/tests/test_renko_bot.py"],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "~95% (all core flows verified; only minor toast-overlay click flakiness in automation)"},
+  "test_credentials": "No auth required for this app.",
+  "seed_data_creation": "None. Bot is stateful in-memory; tests reset before/after.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend engine resets on hot-reload. Always call POST /api/bot/stop then /api/bot/reset before timing-sensitive tests, and optionally POST /api/settings {brick_size:20} to speed up brick formation. SHORT entry requires 2 consecutive red bricks in the random walk; with brick_size=20 it typically appears within 30-90s, but a strongly trending random walk (as observed during UI test) can produce 30+ consecutive greens with no entry — this is not a bug. Backend pytest suite at /app/backend/tests/test_renko_bot.py runs end-to-end strategy validation in ~90s.",
+  "rca of the issue": "N/A - no functional bugs found. Only cosmetic toast overlay observation noted."
+}
