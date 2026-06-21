@@ -75,8 +75,8 @@ export default function Dashboard() {
 
   const saveSettings = async () => {
     await axios.post(`${API}/settings`, {
-      brick_size: Number(form.brick_size), lot_size: Number(form.lot_size),
-      buffer_points: Number(form.buffer_points),
+      brick_size: Number(form.brick_size), bar_seconds: Number(form.bar_seconds),
+      lot_size: Number(form.lot_size), buffer_points: Number(form.buffer_points),
       max_red_single_green: Number(form.max_red_single_green),
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
     });
@@ -107,7 +107,7 @@ export default function Dashboard() {
           </div>
           <div>
             <h1 className="font-heading font-extrabold text-base tracking-tight leading-none">RENKO ALGO</h1>
-            <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-400 leading-none mt-0.5">Nifty Fut · 1m · {state.settings.brick_size}pt</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.12em] text-slate-400 leading-none mt-0.5">Nifty Fut · Traditional · {state.settings.brick_size}pt</p>
           </div>
         </div>
 
@@ -145,7 +145,7 @@ export default function Dashboard() {
               <div className="flex items-center gap-3 font-mono text-[11px]">
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-emerald-500 inline-block" /> Green</span>
                 <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 bg-red-500 inline-block" /> Red</span>
-                <span className="text-slate-400">Reds: <b className="text-slate-700">{state.consec_red}</b> · Greens: <b className="text-slate-700">{state.consec_green}</b></span>
+                <span className="text-slate-400">Bar <b className="text-slate-700">{state.ticks_in_bar}/{state.settings.bar_seconds}s</b> · Reds <b className="text-slate-700">{state.consec_red}</b> · Greens <b className="text-slate-700">{state.consec_green}</b></span>
               </div>
             }>
             <RenkoChart bricks={state.bricks} />
@@ -249,9 +249,9 @@ export default function Dashboard() {
             <Widget title="Strategy" testid="settings-widget" icon={<SettingsIcon className="h-3.5 w-3.5 text-slate-500" />}>
               <div className="grid grid-cols-2 gap-2">
                 {[
-                  ["Brick Size", "brick_size"], ["Lot Size", "lot_size"],
-                  ["Buffer (pt)", "buffer_points"], ["Max Reds→1G", "max_red_single_green"],
-                  ["Greens (ext)", "greens_to_exit_extended"],
+                  ["Brick Size", "brick_size"], ["Bar Secs", "bar_seconds"],
+                  ["Lot Size", "lot_size"], ["Buffer (pt)", "buffer_points"],
+                  ["Max Reds→1G", "max_red_single_green"], ["Greens (ext)", "greens_to_exit_extended"],
                 ].map(([label, key]) => (
                   <div key={key}>
                     <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">{label}</label>

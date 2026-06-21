@@ -40,6 +40,7 @@ class TradingEngine:
             "symbol": "NIFTY FUT",
             "brick_size": 50,
             "timeframe": "1m",
+            "bar_seconds": 5,              # bar length: brick is checked on each bar CLOSE (TradingView style). Live=60
             "lot_size": 65,
             "buffer_points": 5,            # SEBI-safe limit buffer (no market orders)
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
@@ -56,7 +57,9 @@ class TradingEngine:
         self.price = self.start_price
         self.prev_price = self.start_price
         self.momentum = 0.0
-        self.anchor = None
+        self.anchor = None            # close level of last brick (Traditional Renko)
+        self.direction = 0            # +1 up, -1 down, 0 none
+        self.ticks_in_bar = 0         # ticks accumulated in the current bar
         self.bricks: List[Dict[str, Any]] = []
         self.brick_seq = 0
 
@@ -80,20 +83,33 @@ class TradingEngine:
         self.momentum -= (self.price - self.start_price) * 0.0006
         self.price += self.momentum + random.gauss(0, 2.5)
 
-    # -------- renko construction (simple renko) --------
-    def _build_bricks(self):
+    # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
+    # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
+    # a REVERSAL needs a 2x brick move (the first opposite brick prints only after 2 boxes).
+    def _feed_close(self, price):
         bs = self.settings["brick_size"]
         formed = []
         if self.anchor is None:
-            self.anchor = round(self.price / bs) * bs
-        while self.price >= self.anchor + bs:
-            o, c = self.anchor, self.anchor + bs
+            self.anchor = round(price / bs) * bs
+            self.direction = 0
+            return formed
+        n = int((price - self.anchor) / bs)   # signed number of full bricks from last close
+        if n == 0:
+            return formed
+        s = 1 if n > 0 else -1
+        if self.direction == 0 or s == self.direction:
+            count = abs(n)                    # continuation: 1x brick each
+        else:
+            if abs(n) < 2:                    # reversal needs 2x brick move
+                return formed
+            count = abs(n) - 1                # first box consumed crossing back over last brick
+            self.anchor += s * bs             # reversal "gap" brick (not drawn)
+        for _ in range(count):
+            o = self.anchor
+            c = self.anchor + s * bs
             self.anchor = c
-            formed.append(self._new_brick("green", o, c))
-        while self.price <= self.anchor - bs:
-            o, c = self.anchor, self.anchor - bs
-            self.anchor = c
-            formed.append(self._new_brick("red", o, c))
+            self.direction = s
+            formed.append(self._new_brick("green" if s > 0 else "red", o, c))
         return formed
 
     def _new_brick(self, color, o, c):
@@ -201,14 +217,19 @@ class TradingEngine:
                 (self.position["entry_price"] - self.price) * self.position["qty"], 2)
 
     # -------- main loop --------
+    # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
+    # (every bar_seconds), using that bar's close price - just like TradingView 1m Renko.
     async def run_loop(self):
         while True:
             try:
                 if self.running:
                     self._gen_price()
-                    for b in self._build_bricks():
-                        self._process_brick(b)
+                    self.ticks_in_bar += 1
                     self._update_unrealized()
+                    if self.ticks_in_bar >= self.settings["bar_seconds"]:
+                        self.ticks_in_bar = 0
+                        for b in self._feed_close(self.price):   # feed the BAR CLOSE
+                            self._process_brick(b)
             except Exception as e:
                 logger.exception("engine tick error: %s", e)
             await asyncio.sleep(self.settings["tick_interval"])
@@ -231,6 +252,8 @@ class TradingEngine:
         self.price = self.prev_price = self.start_price
         self.momentum = 0.0
         self.anchor = None
+        self.direction = 0
+        self.ticks_in_bar = 0
         self.bricks = []
         self.brick_seq = 0
         self.consec_red = self.consec_green = self.down_run_reds = 0
@@ -256,6 +279,8 @@ class TradingEngine:
             "consec_red": self.consec_red,
             "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds,
+            "direction": self.direction,
+            "ticks_in_bar": self.ticks_in_bar,
             "orders": self.orders[:12],
             "metrics": {**m, "win_rate": win_rate,
                         "unrealized_pnl": self.position["unrealized_pnl"] if self.position else 0.0},
@@ -268,6 +293,7 @@ engine = TradingEngine(db)
 # ----------------------------- API -----------------------------
 class SettingsUpdate(BaseModel):
     brick_size: Optional[int] = None
+    bar_seconds: Optional[int] = None
     lot_size: Optional[int] = None
     buffer_points: Optional[float] = None
     max_red_single_green: Optional[int] = None
