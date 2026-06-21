@@ -17,20 +17,22 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 
 ## Implemented (2026-06-21)
 - Simulated NIFTY futures price feed (momentum random walk + mean reversion).
-- Renko brick construction (brick size 50) with live SVG chart + SHORT/COVER signal markers.
+- Renko brick construction — **Traditional Renko (TradingView-style)**: 1× continuation, 2× reversal, close-based on each bar (default **60s = 1-min**).
 - Strategy state machine: short on 2 reds; exit on 1 green (≤4 reds) or 2 greens (>4 reds).
 - SEBI-safe LIMIT order simulation: SELL=ref−buffer, BUY=ref+buffer; ~25% orders go to 5s RETRY then COMPLETE.
-- Trade log, P&L (realized + unrealized), win-rate, win/loss metrics persisted in Mongo.
-- Strategy settings panel (brick size, lot size, buffer, exit thresholds), bot Start/Stop/Reset.
+- **Crash/restart recovery**: engine state (position, bricks, anchor, counters) persisted to Mongo `engine_state` and restored on startup. In-flight order flags cleared (LIVE: must reconcile with broker positions).
+- **Duplicate-order protection**: single async order lock + in-flight state re-validation drops stale/duplicate triggers.
+- **Auto square-off**: monthly expiry = last Thursday; auto-exits open position at 15:20 IST on expiry day and blocks new entries that day; carry-forward all other days. Manual `POST /api/bot/square-off` button too.
+- Trade log, P&L (realized + unrealized), win-rate; expiry/square-off info card; editable strategy + square-off settings.
 - Angel One config form (stores key/client id, stays DEMO — no real orders).
-- Tested: backend 8/8 pytest passed; frontend core flows verified.
+- Tested: crash recovery, manual square-off (trade recorded w/ exit_reason), duplicate guard, expiry calc all verified.
 
 ## Backlog
-- P1: Real Angel One SmartAPI integration (login, LTP feed, order placement) with a DEMO↔LIVE toggle.
+- P1: Real Angel One SmartAPI integration (login, LTP feed, order placement) with DEMO↔LIVE toggle; reconcile recovered position against broker on startup.
+- P1: Risk controls — daily max-loss circuit breaker, hard stop-loss, max-trades/day, overnight gap guard.
 - P1: Replace polling with WebSocket/SSE live stream.
-- P2: Entry invalidation if a green brick prints before the SELL fills.
-- P2: Multi-retry with max attempts + final REJECTED order state.
-- P2: Split backend into engine.py / routes.py / models.py; add Pydantic Trade model.
+- P2: Partial-fill handling; multi-retry with max attempts + REJECTED state; market-hours/holiday calendar; brokerage/STT in P&L.
+- P2: Split backend into engine.py / routes.py / models.py; Pydantic Trade model.
 - P2: Historical analytics (equity curve, per-day P&L).
 
 ## Next Tasks

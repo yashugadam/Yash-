@@ -5,12 +5,14 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import asyncio
 import random
+import calendar
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, time as dtime
+from zoneinfo import ZoneInfo
 
 
 ROOT_DIR = Path(__file__).parent
@@ -26,9 +28,27 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("renko-bot")
 
+IST = ZoneInfo("Asia/Kolkata")
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def last_thursday(year, month):
+    # NIFTY futures expire on the last Thursday of the month.
+    weeks = calendar.monthcalendar(year, month)
+    thursdays = [w[calendar.THURSDAY] for w in weeks if w[calendar.THURSDAY] != 0]
+    return date(year, month, thursdays[-1])
+
+
+def next_expiry(d):
+    exp = last_thursday(d.year, d.month)
+    if d <= exp:
+        return exp
+    y = d.year + (1 if d.month == 12 else 0)
+    m = 1 if d.month == 12 else d.month + 1
+    return last_thursday(y, m)
 
 
 # ----------------------------- Trading Engine -----------------------------
@@ -46,6 +66,8 @@ class TradingEngine:
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
             "greens_to_exit_extended": 2,
             "tick_interval": 1.0,
+            "square_off_time": "15:20",    # IST: auto square-off time on expiry day
+            "auto_square_off": True,
         }
         # runtime
         self.running = False
@@ -74,6 +96,11 @@ class TradingEngine:
         # books
         self.orders: List[Dict[str, Any]] = []
         self.metrics = {"realized_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
+
+        # safety: duplicate-order protection, expiry square-off, crash recovery
+        self.order_lock = asyncio.Lock()
+        self.squared_off_date: Optional[str] = None   # date (IST) we already squared off / blocked entries
+        self.persist_counter = 0
 
     # -------- price simulation --------
     def _gen_price(self):
@@ -128,7 +155,7 @@ class TradingEngine:
             self.consec_green = 0
             if self.position or self.pending_entry:
                 self.down_run_reds += 1
-            elif self.consec_red == 2:
+            elif self.consec_red == 2 and not self._entries_blocked():
                 self.down_run_reds = 2
                 self.pending_entry = True
                 brick["signal"] = "SHORT"
@@ -144,38 +171,51 @@ class TradingEngine:
                     brick["signal"] = "COVER"
                     asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, brick["index"]))
 
-    # -------- order execution (demo, SEBI-safe limit + 5s retry) --------
-    async def _execute_order(self, side, kind, ref_price, brick_index):
-        bs_buffer = self.settings["buffer_points"]
-        limit = ref_price - bs_buffer if side == "SELL" else ref_price + bs_buffer
-        order = {
-            "id": str(uuid.uuid4()), "side": side, "kind": kind,
-            "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
-            "order_type": "LIMIT", "ref_price": round(ref_price, 2),
-            "limit_price": round(limit, 2), "status": "PENDING", "attempts": 1,
-            "brick_index": brick_index, "time": now_iso(), "fill_price": None,
-            "note": "Limit order (SEBI compliant - no market order)",
-        }
-        self.orders.insert(0, order)
-        self.orders = self.orders[:60]
+    # -------- order execution (demo, SEBI-safe limit + 5s retry, duplicate-protected) --------
+    async def _execute_order(self, side, kind, ref_price, brick_index, reason="SIGNAL"):
+        # Duplicate-order protection: only one order may be in-flight at a time, and we
+        # re-validate state inside the lock so a stale/duplicate trigger is dropped.
+        async with self.order_lock:
+            if kind == "ENTRY" and self.position is not None:
+                logger.warning("Duplicate ENTRY dropped - position already open")
+                self.pending_entry = False
+                return
+            if kind == "EXIT" and self.position is None:
+                logger.warning("EXIT dropped - no open position")
+                self.pending_exit = False
+                return
 
-        await asyncio.sleep(0.5)  # simulate broker round-trip
-        filled = random.random() < 0.75
-        if not filled:
-            # Not filled -> re-check & re-place after 5 seconds with a wider buffer
-            order["status"] = "RETRYING"
-            order["note"] = "Not filled in 5s - re-checking & re-placing order"
-            await asyncio.sleep(5)
-            order["attempts"] = 2
-            wider = bs_buffer * 2
-            limit = ref_price - wider if side == "SELL" else ref_price + wider
-            order["limit_price"] = round(limit, 2)
+            bs_buffer = self.settings["buffer_points"]
+            limit = ref_price - bs_buffer if side == "SELL" else ref_price + bs_buffer
+            order = {
+                "id": str(uuid.uuid4()), "side": side, "kind": kind, "reason": reason,
+                "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
+                "order_type": "LIMIT", "ref_price": round(ref_price, 2),
+                "limit_price": round(limit, 2), "status": "PENDING", "attempts": 1,
+                "brick_index": brick_index, "time": now_iso(), "fill_price": None,
+                "note": "Limit order (SEBI compliant - no market order)",
+            }
+            self.orders.insert(0, order)
+            self.orders = self.orders[:60]
 
-        order["status"] = "COMPLETE"
-        order["fill_price"] = order["limit_price"]
-        order["fill_time"] = now_iso()
-        order["note"] = "Order filled (demo)"
-        self._apply_fill(order)
+            await asyncio.sleep(0.5)  # simulate broker round-trip
+            filled = random.random() < 0.75
+            if not filled:
+                # Not filled -> re-check & re-place after 5 seconds with a wider buffer
+                order["status"] = "RETRYING"
+                order["note"] = "Not filled in 5s - re-checking & re-placing order"
+                await asyncio.sleep(5)
+                order["attempts"] = 2
+                wider = bs_buffer * 2
+                limit = ref_price - wider if side == "SELL" else ref_price + wider
+                order["limit_price"] = round(limit, 2)
+
+            order["status"] = "COMPLETE"
+            order["fill_price"] = order["limit_price"]
+            order["fill_time"] = now_iso()
+            order["note"] = "Order filled (demo)"
+            self._apply_fill(order)
+        asyncio.create_task(self._persist_state())
 
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":
@@ -196,6 +236,7 @@ class TradingEngine:
                     "entry_price": entry, "exit_price": exit_p,
                     "entry_time": self.position["entry_time"], "exit_time": order["fill_time"],
                     "pnl": pnl, "reds": self.down_run_reds, "symbol": self.settings["symbol"],
+                    "exit_reason": order.get("reason", "SIGNAL"),
                 }
                 asyncio.create_task(self._save_trade(trade))
                 self.metrics["realized_pnl"] = round(self.metrics["realized_pnl"] + pnl, 2)
@@ -216,6 +257,82 @@ class TradingEngine:
             self.position["unrealized_pnl"] = round(
                 (self.position["entry_price"] - self.price) * self.position["qty"], 2)
 
+    # -------- expiry / square-off --------
+    def _expiry_status(self):
+        ist = datetime.now(IST)
+        today = ist.date()
+        exp = next_expiry(today)
+        is_today = (today == exp)
+        try:
+            hh, mm = map(int, str(self.settings["square_off_time"]).split(":"))
+        except Exception:
+            hh, mm = 15, 20
+        past_cut = ist.time() >= dtime(hh, mm)
+        return ist, today, exp, is_today, past_cut
+
+    def _entries_blocked(self):
+        # No new entries once we've hit the expiry-day square-off window.
+        _, _, _, is_today, past_cut = self._expiry_status()
+        return bool(is_today and past_cut)
+
+    def _maybe_square_off(self):
+        if not self.settings.get("auto_square_off", True):
+            return
+        _, today, _, is_today, past_cut = self._expiry_status()
+        if is_today and past_cut and self.squared_off_date != str(today):
+            if self.position and not self.pending_exit:
+                self.squared_off_date = str(today)
+                logger.warning("EXPIRY square-off triggered at %s IST", self.settings["square_off_time"])
+                self._force_exit("EXPIRY_SQUAREOFF")
+            elif self.position is None and not self.pending_exit:
+                self.squared_off_date = str(today)  # nothing to exit; just block new entries
+
+    def _force_exit(self, reason):
+        if not self.position or self.pending_exit:
+            return
+        self.pending_exit = True
+        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, reason))
+
+    # -------- crash / restart recovery --------
+    def _state_doc(self):
+        return {
+            "_id": "singleton", "saved_at": now_iso(),
+            "running": self.running, "price": self.price,
+            "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
+            "bricks": self.bricks[-200:],
+            "consec_red": self.consec_red, "consec_green": self.consec_green,
+            "down_run_reds": self.down_run_reds, "position": self.position,
+            "squared_off_date": self.squared_off_date,
+        }
+
+    async def _persist_state(self):
+        try:
+            await self.db.engine_state.replace_one({"_id": "singleton"}, self._state_doc(), upsert=True)
+        except Exception as e:
+            logger.exception("state persist failed: %s", e)
+
+    async def _load_state(self):
+        doc = await self.db.engine_state.find_one({"_id": "singleton"})
+        if not doc:
+            return
+        self.anchor = doc.get("anchor")
+        self.direction = doc.get("direction", 0)
+        self.brick_seq = doc.get("brick_seq", 0)
+        self.bricks = doc.get("bricks") or []
+        self.consec_red = doc.get("consec_red", 0)
+        self.consec_green = doc.get("consec_green", 0)
+        self.down_run_reds = doc.get("down_run_reds", 0)
+        self.position = doc.get("position")
+        self.squared_off_date = doc.get("squared_off_date")
+        self.price = self.prev_price = doc.get("price", self.start_price)
+        self.running = doc.get("running", False)
+        # In-flight orders cannot be trusted across a crash -> clear flags.
+        # LIVE NOTE: reconcile self.position against Angel One's actual positions here.
+        self.pending_entry = self.pending_exit = False
+        if self.position:
+            logger.warning("RECOVERED open position from disk: %s", self.position)
+        logger.info("Engine state restored (running=%s, bricks=%d)", self.running, len(self.bricks))
+
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
     # (every bar_seconds), using that bar's close price - just like TradingView 1m Renko.
@@ -230,6 +347,12 @@ class TradingEngine:
                         self.ticks_in_bar = 0
                         for b in self._feed_close(self.price):   # feed the BAR CLOSE
                             self._process_brick(b)
+                    self._maybe_square_off()
+                    # periodic crash-recovery snapshot (~every 15s)
+                    self.persist_counter += 1
+                    if self.persist_counter >= 15:
+                        self.persist_counter = 0
+                        asyncio.create_task(self._persist_state())
             except Exception as e:
                 logger.exception("engine tick error: %s", e)
             await asyncio.sleep(self.settings["tick_interval"])
@@ -259,12 +382,14 @@ class TradingEngine:
         self.consec_red = self.consec_green = self.down_run_reds = 0
         self.position = None
         self.pending_entry = self.pending_exit = False
+        self.squared_off_date = None
         self.orders = []
 
     def snapshot(self):
         m = self.metrics
         total = m["trades"]
         win_rate = round((m["wins"] / total) * 100, 1) if total else 0.0
+        ist, today, exp, is_today, past_cut = self._expiry_status()
         return {
             "running": self.running,
             "mode": self.mode,
@@ -282,6 +407,15 @@ class TradingEngine:
             "direction": self.direction,
             "ticks_in_bar": self.ticks_in_bar,
             "orders": self.orders[:12],
+            "expiry": {
+                "next": str(exp),
+                "is_today": is_today,
+                "square_off_time": self.settings["square_off_time"],
+                "auto_square_off": self.settings.get("auto_square_off", True),
+                "squared_off": self.squared_off_date == str(today),
+                "ist_time": ist.strftime("%H:%M:%S"),
+                "entries_blocked": bool(is_today and past_cut),
+            },
             "metrics": {**m, "win_rate": win_rate,
                         "unrealized_pnl": self.position["unrealized_pnl"] if self.position else 0.0},
         }
@@ -298,6 +432,8 @@ class SettingsUpdate(BaseModel):
     buffer_points: Optional[float] = None
     max_red_single_green: Optional[int] = None
     greens_to_exit_extended: Optional[int] = None
+    square_off_time: Optional[str] = None
+    auto_square_off: Optional[bool] = None
 
 
 class AngelConfig(BaseModel):
@@ -331,8 +467,17 @@ async def stop_bot():
 async def reset_bot():
     engine.reset()
     await db.trades.delete_many({})
+    await db.engine_state.delete_one({"_id": "singleton"})
     await engine.load_metrics()
     return {"ok": True}
+
+
+@api_router.post("/bot/square-off")
+async def square_off():
+    if not engine.position:
+        return {"ok": False, "message": "No open position to square off."}
+    engine._force_exit("MANUAL_SQUAREOFF")
+    return {"ok": True, "message": "Square-off order placed (demo)."}
 
 
 @api_router.get("/trades")
@@ -369,6 +514,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await engine.load_metrics()
+    await engine._load_state()   # crash/restart recovery
     asyncio.create_task(engine.run_loop())
     logger.info("Trading engine started")
 

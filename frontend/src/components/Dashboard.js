@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   Activity, Play, Square, RotateCcw, Settings as SettingsIcon, TrendingDown,
   Zap, ShieldCheck, ChevronUp, ChevronDown, Layers, Lock, Save,
+  CalendarClock, AlertTriangle, XCircle,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
 
@@ -87,6 +88,12 @@ export default function Dashboard() {
   const saveAngel = async () => {
     await axios.post(`${API}/angel/config`, angel);
     toast.success("Angel One details saved — bot stays in DEMO mode");
+  };
+
+  const squareOff = async () => {
+    const { data } = await axios.post(`${API}/bot/square-off`);
+    toast[data.ok ? "warning" : "info"](data.message);
+    poll();
   };
 
   if (!state) {
@@ -216,13 +223,35 @@ export default function Dashboard() {
                   <p className={`font-mono text-xl font-bold ${pnlClass(m.unrealized_pnl)}`} data-testid="unrealized-pnl">{sign(m.unrealized_pnl)}{fmt(m.unrealized_pnl)}</p>
                 </div>
                 <p className="font-mono text-[10px] text-slate-400 mt-2">Reds in run: {state.down_run_reds} · exit on {state.down_run_reds > state.settings.max_red_single_green ? state.settings.greens_to_exit_extended : 1} green</p>
+                <button onClick={squareOff} data-testid="square-off-button"
+                  className="w-full mt-3 border border-red-300 hover:bg-red-100 text-red-700 font-mono uppercase text-[11px] tracking-wider px-3 py-1.5 transition-colors flex items-center justify-center gap-2">
+                  <XCircle className="h-3.5 w-3.5" /> Square off now
+                </button>
               </div>
             ) : (
               <div className="text-center py-6" data-testid="no-position">
                 <p className="font-mono text-xs uppercase tracking-widest text-slate-400">Flat — no position</p>
-                <p className="font-mono text-[11px] text-slate-300 mt-1">{state.pending_entry ? "Entry order placing…" : "Waiting for 2 red bricks"}</p>
+                <p className="font-mono text-[11px] text-slate-300 mt-1">{state.pending_entry ? "Entry order placing…" : state.expiry.entries_blocked ? "Entries blocked (expiry square-off window)" : "Waiting for 2 red bricks"}</p>
               </div>
             )}
+          </Widget>
+
+          {/* Expiry / Square-off */}
+          <Widget title="Expiry & Square-off" testid="expiry-widget"
+            icon={<CalendarClock className="h-3.5 w-3.5 text-slate-500" />}
+            right={state.expiry.is_today
+              ? <span className="bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 text-[10px] font-mono uppercase">Expiry Today</span>
+              : <span className="font-mono text-[10px] text-slate-400 uppercase">Carry forward</span>}>
+            <div className="grid grid-cols-2 gap-2">
+              <div><p className="font-mono text-[10px] uppercase text-slate-400">Next Expiry</p><p className="font-mono text-sm font-semibold" data-testid="next-expiry">{state.expiry.next}</p></div>
+              <div><p className="font-mono text-[10px] uppercase text-slate-400">IST Now</p><p className="font-mono text-sm font-semibold">{state.expiry.ist_time}</p></div>
+              <div><p className="font-mono text-[10px] uppercase text-slate-400">Square-off</p><p className="font-mono text-sm font-semibold">{state.expiry.square_off_time}</p></div>
+              <div><p className="font-mono text-[10px] uppercase text-slate-400">Auto</p><p className={`font-mono text-sm font-semibold ${state.expiry.auto_square_off ? "text-emerald-600" : "text-slate-400"}`}>{state.expiry.auto_square_off ? "ON" : "OFF"}</p></div>
+            </div>
+            {state.expiry.squared_off && (
+              <p className="font-mono text-[10px] text-red-600 mt-2 flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Squared off for expiry — new entries blocked today</p>
+            )}
+            <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits any open position at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days.</p>
           </Widget>
 
           {/* Orders */}
