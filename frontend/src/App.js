@@ -11,7 +11,7 @@ function App() {
           <Route path="/" element={<Dashboard />} />
         </Routes>
       </BrowserRouter>
-      <Toaster position="top-right" />
+      <Toaster position="bottom-right" />
     </div>
   );
 }
