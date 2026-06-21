@@ -1,0 +1,143 @@
+{
+  "theme": "light",
+  "archetype": "Archetype 4 (Swiss & High-Contrast)",
+  "emotional_tone": "Objective, fast, reliable, institutional, data-dense, operational",
+  "typography": {
+    "headings": {
+      "font_family": "Chivo, sans-serif",
+      "classes": "font-sans tracking-tight leading-none text-slate-900"
+    },
+    "body": {
+      "font_family": "IBM Plex Sans, sans-serif",
+      "classes": "font-sans leading-tight text-slate-800"
+    },
+    "mono": {
+      "font_family": "IBM Plex Mono, monospace",
+      "classes": "font-mono tracking-tight",
+      "usage": "Use for all P&L values, ticker prices, timestamps, and data table cells"
+    },
+    "scales": {
+      "h1": "text-2xl sm:text-3xl font-bold",
+      "h2": "text-xl sm:text-2xl font-semibold",
+      "h3": "text-lg sm:text-xl font-medium",
+      "h4": "text-base font-semibold",
+      "body": "text-sm",
+      "small": "text-xs tracking-[0.05em] uppercase text-slate-500"
+    }
+  },
+  "colors": {
+    "background": {
+      "primary": "#FFFFFF",
+      "secondary": "#F8FAFC",
+      "tertiary": "#F1F5F9",
+      "overlay": "rgba(15, 23, 42, 0.4)"
+    },
+    "text": {
+      "primary": "#0F172A",
+      "secondary": "#64748B",
+      "muted": "#94A3B8",
+      "inverse": "#FFFFFF"
+    },
+    "status": {
+      "profit": "#10B981", 
+      "profit_bg": "#ECFDF5",
+      "loss": "#EF4444", 
+      "loss_bg": "#FEF2F2",
+      "neutral": "#3B82F6",
+      "warning": "#F59E0B"
+    },
+    "border": "#E2E8F0",
+    "chart": {
+      "green_brick": "#10B981",
+      "red_brick": "#EF4444",
+      "grid_line": "#F1F5F9"
+    }
+  },
+  "layout_and_spacing": {
+    "philosophy": "Dense Control Room Grid - optimize for scanning and maximum data density without overwhelming the user.",
+    "grid_system": "grid-cols-1 lg:grid-cols-4 gap-4",
+    "spacing_scale": "Tight spacing. Use p-4 for widget containers, p-2 or p-3 for inner elements.",
+    "borders": "Grid Borders (The 'Technical' Look). Expose the skeleton. Use 1px sharp borders border-slate-200. No rounded corners (rounded-none) or maximum rounded-sm for specific micro-elements."
+  },
+  "components": {
+    "cards_and_widgets": {
+      "style": "bg-white border border-slate-200 rounded-none shadow-none flex flex-col",
+      "header_style": "flex items-center justify-between border-b border-slate-200 px-4 py-3 bg-slate-50",
+      "body_style": "p-4 flex-1"
+    },
+    "buttons": {
+      "primary": "bg-slate-900 hover:bg-slate-800 text-white font-mono uppercase text-xs tracking-wider px-4 py-2 transition-colors flex items-center justify-center gap-2",
+      "action_start": "bg-emerald-600 hover:bg-emerald-700 text-white font-mono uppercase text-xs tracking-wider px-4 py-2 transition-colors",
+      "action_stop": "bg-red-600 hover:bg-red-700 text-white font-mono uppercase text-xs tracking-wider px-4 py-2 transition-colors",
+      "outline": "border border-slate-300 hover:bg-slate-50 text-slate-700 font-mono text-xs px-4 py-2 transition-colors"
+    },
+    "tables": {
+      "style": "w-full text-sm border-collapse",
+      "headers": "text-xs uppercase text-slate-500 bg-slate-50 px-3 py-2 font-mono text-left border-b border-slate-200",
+      "cells": "text-sm font-mono text-slate-800 px-3 py-2 whitespace-nowrap border-b border-slate-100",
+      "row_hover": "hover:bg-slate-50 transition-colors"
+    },
+    "chart_container": {
+      "style": "relative w-full h-[450px] border border-slate-200 bg-white overflow-hidden flex items-center justify-center"
+    },
+    "badges": {
+      "live": "bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 text-xs font-mono uppercase flex items-center gap-1",
+      "demo": "bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 text-xs font-mono uppercase flex items-center gap-1"
+    }
+  },
+  "motion": {
+    "philosophy": "Instantaneous updates. Avoid layout shifts. Flash colors for P&L ticks.",
+    "hover": "transition-colors duration-150 ease-in-out",
+    "data_flash_green": "animate-[flashGreen_1s_ease-out]",
+    "data_flash_red": "animate-[flashRed_1s_ease-out]"
+  },
+  "media": {
+    "image_urls": {
+      "empty_state_texture": {
+        "url": "https://images.unsplash.com/photo-1524351543168-8e38787614e9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODB8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMGdyaWQlMjBsaWdodHxlbnwwfHx8fDE3ODIwMDk1NjN8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Black and white abstract geometric grid pattern. Apply as background with heavy opacity (opacity-[0.03]) in empty states or uninitialized chart views."
+      }
+    }
+  },
+  "icons": {
+    "library": "lucide-react",
+    "instructions": "Use Lucide icons with stroke-width 1.5 or 2. Keep icons minimal. Examples: Play (start bot), Square (stop bot), Activity (live status), Settings (strategy params)."
+  },
+  "views_and_sections": {
+    "header": {
+      "layout": "Flex container, justify-between, items-center. border-b border-slate-200 bg-white px-4 py-3 sticky top-0 z-50",
+      "content": "Brand Logo/Text on left, Ticker (NIFTY FUT) in center with price, Demo/Live Mode Toggle & Bot Start/Stop Button on right."
+    },
+    "main_dashboard": {
+      "layout": "Grid cols-1 lg:grid-cols-4 gap-4 p-4 bg-slate-100 min-h-[calc(100vh-60px)]",
+      "col_left": {
+        "span": "lg:col-span-3 flex flex-col gap-4",
+        "content": [
+          "1. Renko Chart View Card (Main visual surface, high density, large height)",
+          "2. Trade Log Table Card (Recent entries/exits underneath)"
+        ]
+      },
+      "col_right": {
+        "span": "lg:col-span-1 flex flex-col gap-4",
+        "content": [
+          "1. Overall Metrics Card (Total P&L in massive typography, Win Rate)",
+          "2. Current Open Position Card (Direction, Qty, Entry Price, Live P&L)",
+          "3. Strategy Settings Panel Card (Brick Size, Lot Size, Target logic)"
+        ]
+      }
+    }
+  },
+  "accessibility": {
+    "data_testid": "MANDATORY. Add descriptive data-testid to every button, input, table row, toggle, and dynamic number. Use kebab-case roles (e.g., data-testid='start-bot-button').",
+    "contrast": "Ensure all text passes APCA/WCAG AA contrast. Especially red/green P&L text against white/grey backgrounds."
+  },
+  "instructions_to_main_agent": [
+    "Build the dashboard using pure React + Tailwind CSS strictly using .js files.",
+    "Implement the 'Control Room' layout grid: sharp 1px borders, tight padding, and dense typographic scales.",
+    "Use monospace font via Tailwind (font-mono) for all numerical values. This is critical for trading UIs where users track fast-moving numbers.",
+    "P&L values must be formatted exactly and colored based on state (Green for positive, Red for negative). Include +/- signs explicitly.",
+    "Make the UI feel like a scanning surface: lead with the primary price/P&L metrics. Strip away generic 'SaaS' styles like rounded large corners or big shadows.",
+    "Bot Start/Stop must have explicit state indication. Open position card should highlight strongly when a trade is active.",
+    "Strategy parameters input fields must use small, tight inputs appropriate for a high-density dashboard."
+  ]
+}
