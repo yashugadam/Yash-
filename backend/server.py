@@ -76,6 +76,7 @@ class TradingEngine:
         self.running = False
         self.mode = "DEMO"  # order mode: DEMO/paper only (no real orders placed)
         self.feed_mode = "SIM"   # SIM (simulated) or LIVE (real Angel One LTP)
+        self._saved_feed_mode = "SIM"
         self.feed_error = ""
         self.broker = AngelBroker()
         self.angel = {"connected": False, "client_id": "", "api_key": ""}
@@ -413,7 +414,7 @@ class TradingEngine:
             "bricks": self.bricks[-800:],
             "consec_red": self.consec_red, "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds, "position": self.position,
-            "squared_off_date": self.squared_off_date,
+            "squared_off_date": self.squared_off_date, "feed_mode": self.feed_mode,
             "day_key": self.day_key, "day_realized": self.day_realized,
             "breaker_tripped": self.breaker_tripped,
         }
@@ -440,6 +441,7 @@ class TradingEngine:
         self.day_key = doc.get("day_key")
         self.day_realized = doc.get("day_realized", 0.0)
         self.breaker_tripped = doc.get("breaker_tripped", False)
+        self._saved_feed_mode = doc.get("feed_mode", "SIM")
         self.price = self.prev_price = doc.get("price", self.start_price)
         self.running = doc.get("running", False)
         # In-flight orders cannot be trusted across a crash -> clear flags.
@@ -451,7 +453,10 @@ class TradingEngine:
 
     # -------- price source (live Angel LTP or simulated) --------
     async def _next_price(self):
-        if self.feed_mode == "LIVE" and self.broker.connected:
+        if self.feed_mode == "LIVE":
+            if not self.broker.connected:
+                self.feed_error = "Angel not connected (LIVE feed paused)"
+                return  # never inject simulated data into a LIVE chart
             ltp = await asyncio.to_thread(self.broker.get_ltp)
             if ltp is not None:
                 self.prev_price = self.price
@@ -602,12 +607,14 @@ async def get_state():
 @api_router.post("/bot/start")
 async def start_bot():
     engine.running = True
+    await engine._persist_state()
     return {"running": True}
 
 
 @api_router.post("/bot/stop")
 async def stop_bot():
     engine.running = False
+    await engine._persist_state()
     return {"running": False}
 
 
@@ -666,6 +673,7 @@ async def angel_connect():
     res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
     if res.get("connected"):
         engine.feed_mode = "LIVE"
+        await engine._persist_state()
     return res
 
 
@@ -673,6 +681,7 @@ async def angel_connect():
 async def angel_disconnect():
     await asyncio.to_thread(engine.broker.logout)
     engine.feed_mode = "SIM"
+    await engine._persist_state()
     return {"connected": False, "feed_mode": "SIM"}
 
 
@@ -691,6 +700,7 @@ async def set_feed_mode(body: dict):
     if mode == "LIVE" and not engine.broker.connected:
         return {"ok": False, "feed_mode": engine.feed_mode, "error": "Connect Angel One first."}
     engine.feed_mode = "LIVE" if mode == "LIVE" else "SIM"
+    await engine._persist_state()
     return {"ok": True, "feed_mode": engine.feed_mode}
 
 
@@ -710,7 +720,22 @@ async def startup():
     await engine.load_metrics()
     await engine._load_state()   # crash/restart recovery
     asyncio.create_task(engine.run_loop())
+    asyncio.create_task(_auto_connect_angel())   # resume LIVE feed after a restart
     logger.info("Trading engine started")
+
+
+async def _auto_connect_angel():
+    """If Angel creds exist in env, auto-login on boot so a LIVE session survives restarts."""
+    api_key = os.environ.get("ANGEL_API_KEY", "").strip()
+    client_code = os.environ.get("ANGEL_CLIENT_CODE", "").strip()
+    pin = os.environ.get("ANGEL_PIN", "").strip()
+    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
+    if not all([api_key, client_code, pin, totp_secret]):
+        return
+    res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
+    if res.get("connected") and engine._saved_feed_mode == "LIVE":
+        engine.feed_mode = "LIVE"
+        logger.info("Auto-reconnected Angel One; LIVE feed resumed")
 
 
 @app.on_event("shutdown")

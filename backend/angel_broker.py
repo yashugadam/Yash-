@@ -23,7 +23,10 @@ class AngelBroker:
     def __init__(self):
         self.smart = None
         self.connected = False
+        self.api_key = ""
         self.client_code = ""
+        self._pin = ""
+        self._totp = ""
         self.profile_name = ""
         self.error = ""
         # resolved NIFTY current-month future
@@ -34,6 +37,7 @@ class AngelBroker:
 
     def login(self, api_key, client_code, pin, totp_secret):
         self.error = ""
+        self.api_key, self.client_code, self._pin, self._totp = api_key, client_code, pin, totp_secret
         try:
             self.smart = SmartConnect(api_key=api_key)
             otp = pyotp.TOTP(totp_secret).now()
@@ -94,17 +98,30 @@ class AngelBroker:
             except Exception:
                 self.fut_lotsize = None
 
+    def relogin(self):
+        """Re-establish the session (e.g. after token expiry) using stored creds."""
+        if not (self.api_key and self.client_code and self._pin and self._totp):
+            return False
+        res = self.login(self.api_key, self.client_code, self._pin, self._totp)
+        return bool(res.get("connected"))
+
     def get_ltp(self):
         if not self.connected or not self.fut_token:
             return None
-        try:
-            res = self.smart.ltpData("NFO", self.fut_symbol, self.fut_token)
-            if res.get("status"):
-                return float(res["data"]["ltp"])
-            self.error = str(res.get("message") or res)
-        except Exception as e:
-            self.error = str(e)
-            logger.warning("get_ltp failed: %s", e)
+        for attempt in range(2):
+            try:
+                res = self.smart.ltpData("NFO", self.fut_symbol, self.fut_token)
+                if res.get("status"):
+                    return float(res["data"]["ltp"])
+                self.error = str(res.get("message") or res)
+            except Exception as e:
+                self.error = str(e)
+                logger.warning("get_ltp failed (attempt %d): %s", attempt + 1, e)
+            # try one auto-relogin then retry (handles session/token expiry)
+            if attempt == 0:
+                logger.info("Attempting Angel auto-relogin…")
+                if not self.relogin():
+                    break
         return None
 
     def get_history(self, interval, from_dt, to_dt):

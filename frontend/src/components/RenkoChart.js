@@ -26,7 +26,7 @@ const MIN_ZOOM = 0.18;
 const MAX_ZOOM = 4;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-export const RenkoChart = ({ bricks }) => {
+export const RenkoChart = ({ bricks, trades }) => {
   const scrollRef = useRef(null);
   const pinnedRef = useRef(true);
   const focusRef = useRef(null);     // {idx, offset} to keep focal point on zoom
@@ -44,8 +44,8 @@ export const RenkoChart = ({ bricks }) => {
   const gap = BASE_GAP * zoom;
   const step = brickW + gap;
 
-  const { rects, levels, totalW, timeTicks } = useMemo(() => {
-    if (!bricks || bricks.length === 0) return { rects: [], levels: [], totalW: 0, timeTicks: [] };
+  const { rects, levels, totalW, timeTicks, tradeMarks } = useMemo(() => {
+    if (!bricks || bricks.length === 0) return { rects: [], levels: [], totalW: 0, timeTicks: [], tradeMarks: [] };
     let min = Infinity, max = -Infinity;
     bricks.forEach((b) => { min = Math.min(min, b.open, b.close); max = Math.max(max, b.open, b.close); });
     const range = max - min || 50;
@@ -81,8 +81,37 @@ export const RenkoChart = ({ bricks }) => {
     });
 
     const totalW = leftPad + bricks.length * step + rightAxis;
-    return { rects, levels, totalW, timeTicks };
-  }, [bricks, chartH, step, brickW]);
+
+    // overlay closed trades: SELL marker at entry, BUY/cover at exit, connector colored by P&L
+    const tBrick = bricks.map((b) => new Date(b.time).getTime());
+    const firstT = tBrick[0], lastT = tBrick[tBrick.length - 1];
+    const nearestIdx = (t) => {
+      const tt = new Date(t).getTime();
+      let best = 0, bd = Infinity;
+      for (let i = 0; i < tBrick.length; i++) {
+        const d = Math.abs(tBrick[i] - tt);
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
+    };
+    const tradeMarks = (trades || [])
+      .filter((tr) => {
+        const et = new Date(tr.entry_time).getTime();
+        return et >= firstT - 3.6e6 && et <= lastT + 3.6e6;
+      })
+      .map((tr) => {
+        const ei = nearestIdx(tr.entry_time);
+        const xi = nearestIdx(tr.exit_time);
+        return {
+          ex: leftPad + ei * step + brickW / 2, ey: yScale(tr.entry_price),
+          xx: leftPad + xi * step + brickW / 2, xy: yScale(tr.exit_price),
+          entry: tr.entry_price, exit: tr.exit_price, pnl: tr.pnl,
+          reason: tr.exit_reason, time: tr.exit_time,
+        };
+      });
+
+    return { rects, levels, totalW, timeTicks, tradeMarks };
+  }, [bricks, trades, chartH, step, brickW]);
 
   // keep focal point under cursor after a zoom; else auto-scroll to latest when pinned
   useEffect(() => {
@@ -197,6 +226,22 @@ export const RenkoChart = ({ bricks }) => {
               )}
             </g>
           ))}
+          {/* closed-trade overlay: SELL (entry) -> BUY (cover) */}
+          {tradeMarks.map((m, i) => {
+            const col = m.pnl >= 0 ? "#10B981" : "#EF4444";
+            return (
+              <g key={`tm-${i}`}>
+                <title>SHORT {m.entry} → {m.exit} · P&L {m.pnl >= 0 ? "+" : ""}{m.pnl} · {m.reason}</title>
+                <line x1={m.ex} y1={m.ey} x2={m.xx} y2={m.xy} stroke={col} strokeWidth="1.3" strokeDasharray="4 3" opacity="0.85" />
+                {/* entry: SELL (down triangle, dark) */}
+                <polygon points={`${m.ex - 5},${m.ey - 11} ${m.ex + 5},${m.ey - 11} ${m.ex},${m.ey - 2}`} fill="#0F172A" />
+                <circle cx={m.ex} cy={m.ey} r="2.6" fill="#0F172A" />
+                {/* exit: BUY/cover (up triangle, blue) */}
+                <polygon points={`${m.xx - 5},${m.xy + 11} ${m.xx + 5},${m.xy + 11} ${m.xx},${m.xy + 2}`} fill="#3B82F6" />
+                <circle cx={m.xx} cy={m.xy} r="2.6" fill="#3B82F6" />
+              </g>
+            );
+          })}
           <line x1={0} x2={svgW - rightAxis} y1={H - axisH} y2={H - axisH} stroke="#E2E8F0" strokeWidth="1" />
           {timeTicks.map((t, i) => (
             <g key={`tt-${i}`}>

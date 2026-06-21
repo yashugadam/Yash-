@@ -202,7 +202,7 @@ export default function Dashboard() {
                 <span className="text-slate-400">Bar <b className="text-slate-700">{state.ticks_in_bar}/{state.settings.bar_seconds}s</b> · Reds <b className="text-slate-700">{state.consec_red}</b> · Greens <b className="text-slate-700">{state.consec_green}</b></span>
               </div>
             }>
-            <RenkoChart bricks={state.bricks} />
+            <RenkoChart bricks={state.bricks} trades={trades} />
           </Widget>
 
           <Widget title="Trade Log" testid="trades-widget"
