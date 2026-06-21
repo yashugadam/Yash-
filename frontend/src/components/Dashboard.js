@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   Activity, Play, Square, RotateCcw, Settings as SettingsIcon, TrendingDown,
   Zap, ShieldCheck, ChevronUp, ChevronDown, Layers, Lock, Save,
-  CalendarClock, AlertTriangle, XCircle,
+  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
 
@@ -80,6 +80,7 @@ export default function Dashboard() {
       lot_size: Number(form.lot_size), buffer_points: Number(form.buffer_points),
       max_red_single_green: Number(form.max_red_single_green),
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
+      daily_max_loss: Number(form.daily_max_loss),
     });
     toast.success("Strategy parameters updated");
     poll();
@@ -93,6 +94,12 @@ export default function Dashboard() {
   const squareOff = async () => {
     const { data } = await axios.post(`${API}/bot/square-off`);
     toast[data.ok ? "warning" : "info"](data.message);
+    poll();
+  };
+
+  const armBreaker = async () => {
+    const { data } = await axios.post(`${API}/bot/arm`);
+    toast.success(data.message);
     poll();
   };
 
@@ -254,6 +261,39 @@ export default function Dashboard() {
             <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits any open position at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days.</p>
           </Widget>
 
+          {/* Risk / Circuit Breaker */}
+          <Widget title="Risk · Circuit Breaker" testid="risk-widget"
+            icon={<ShieldAlert className="h-3.5 w-3.5 text-slate-500" />}
+            right={state.risk.breaker_tripped
+              ? <span className="bg-red-600 text-white px-2 py-0.5 text-[10px] font-mono uppercase flex items-center gap-1"><ShieldX className="h-3 w-3" /> Tripped</span>
+              : <span className="bg-emerald-100 text-emerald-700 border border-emerald-200 px-2 py-0.5 text-[10px] font-mono uppercase">Armed</span>}>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <p className="font-mono text-[10px] uppercase text-slate-400">Day P&L (₹)</p>
+                <p className={`font-mono text-lg font-bold ${pnlClass(state.risk.day_total)}`} data-testid="day-pnl">{sign(state.risk.day_total)}{fmt(state.risk.day_total)}</p>
+              </div>
+              <div>
+                <p className="font-mono text-[10px] uppercase text-slate-400">Max Loss (₹)</p>
+                <p className="font-mono text-lg font-bold text-red-500">-{fmt(state.risk.daily_max_loss, 0)}</p>
+              </div>
+            </div>
+            {/* loss progress bar */}
+            <div className="mt-2 h-1.5 w-full bg-slate-100">
+              <div className="h-1.5 bg-red-500 transition-all" style={{ width: `${Math.min(100, Math.max(0, (-Math.min(0, state.risk.day_total) / state.risk.daily_max_loss) * 100))}%` }} />
+            </div>
+            {state.risk.breaker_tripped ? (
+              <div className="mt-3">
+                <p className="font-mono text-[10px] text-red-600 flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Breaker tripped — bot auto-stopped & entries blocked for today.</p>
+                <button onClick={armBreaker} data-testid="rearm-button"
+                  className="w-full mt-2 border border-slate-300 hover:bg-slate-50 text-slate-700 font-mono uppercase text-[11px] tracking-wider px-3 py-1.5 transition-colors flex items-center justify-center gap-2">
+                  <ShieldCheck className="h-3.5 w-3.5" /> Re-arm breaker
+                </button>
+              </div>
+            ) : (
+              <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-stops the bot & squares off if today's P&L (realized + unrealized) hits -₹{fmt(state.risk.daily_max_loss, 0)}.</p>
+            )}
+          </Widget>
+
           {/* Orders */}
           <Widget title="Order Book" testid="orders-widget" icon={<Activity className="h-3.5 w-3.5 text-slate-500" />}>
             <div className="space-y-1.5 max-h-[160px] overflow-y-auto">
@@ -281,6 +321,7 @@ export default function Dashboard() {
                   ["Brick Size", "brick_size"], ["Bar Secs", "bar_seconds"],
                   ["Lot Size", "lot_size"], ["Buffer (pt)", "buffer_points"],
                   ["Max Reds→1G", "max_red_single_green"], ["Greens (ext)", "greens_to_exit_extended"],
+                  ["Day Max Loss ₹", "daily_max_loss"],
                 ].map(([label, key]) => (
                   <div key={key}>
                     <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">{label}</label>

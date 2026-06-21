@@ -68,6 +68,8 @@ class TradingEngine:
             "tick_interval": 1.0,
             "square_off_time": "15:20",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
+            "daily_max_loss": 5000,        # ₹: auto-stop the bot if day P&L falls to -this
+            "circuit_breaker_enabled": True,
         }
         # runtime
         self.running = False
@@ -101,6 +103,10 @@ class TradingEngine:
         self.order_lock = asyncio.Lock()
         self.squared_off_date: Optional[str] = None   # date (IST) we already squared off / blocked entries
         self.persist_counter = 0
+        # risk: daily max-loss circuit breaker
+        self.day_key: Optional[str] = None            # IST date the day P&L belongs to
+        self.day_realized = 0.0                       # realized P&L booked today
+        self.breaker_tripped = False
 
     # -------- price simulation --------
     def _gen_price(self):
@@ -245,6 +251,13 @@ class TradingEngine:
                     self.metrics["wins"] += 1
                 else:
                     self.metrics["losses"] += 1
+                # track today's realized P&L for the circuit breaker
+                today = datetime.now(IST).date().isoformat()
+                if self.day_key != today:
+                    self.day_key = today
+                    self.day_realized = 0.0
+                    self.breaker_tripped = False
+                self.day_realized = round(self.day_realized + pnl, 2)
             self.position = None
             self.pending_exit = False
             self.down_run_reds = 0
@@ -271,9 +284,32 @@ class TradingEngine:
         return ist, today, exp, is_today, past_cut
 
     def _entries_blocked(self):
-        # No new entries once we've hit the expiry-day square-off window.
+        # No new entries once we've hit the expiry-day square-off window or the circuit breaker.
         _, _, _, is_today, past_cut = self._expiry_status()
-        return bool(is_today and past_cut)
+        return bool((is_today and past_cut) or self.breaker_tripped)
+
+    # -------- risk: daily max-loss circuit breaker --------
+    def _check_circuit_breaker(self):
+        if not self.settings.get("circuit_breaker_enabled", True):
+            return
+        today = datetime.now(IST).date().isoformat()
+        if self.day_key != today:          # new trading day -> reset day P&L + re-arm
+            self.day_key = today
+            self.day_realized = 0.0
+            self.breaker_tripped = False
+        if self.breaker_tripped:
+            self.running = False           # stay halted for the rest of the day
+            return
+        unreal = self.position["unrealized_pnl"] if self.position else 0.0
+        day_total = self.day_realized + unreal
+        if day_total <= -abs(self.settings["daily_max_loss"]):
+            self.breaker_tripped = True
+            logger.warning("CIRCUIT BREAKER tripped: day P&L %.2f <= -%s", day_total,
+                           self.settings["daily_max_loss"])
+            if self.position and not self.pending_exit:
+                self._force_exit("CIRCUIT_BREAKER")
+            self.running = False
+            asyncio.create_task(self._persist_state())
 
     def _maybe_square_off(self):
         if not self.settings.get("auto_square_off", True):
@@ -303,6 +339,8 @@ class TradingEngine:
             "consec_red": self.consec_red, "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds, "position": self.position,
             "squared_off_date": self.squared_off_date,
+            "day_key": self.day_key, "day_realized": self.day_realized,
+            "breaker_tripped": self.breaker_tripped,
         }
 
     async def _persist_state(self):
@@ -324,6 +362,9 @@ class TradingEngine:
         self.down_run_reds = doc.get("down_run_reds", 0)
         self.position = doc.get("position")
         self.squared_off_date = doc.get("squared_off_date")
+        self.day_key = doc.get("day_key")
+        self.day_realized = doc.get("day_realized", 0.0)
+        self.breaker_tripped = doc.get("breaker_tripped", False)
         self.price = self.prev_price = doc.get("price", self.start_price)
         self.running = doc.get("running", False)
         # In-flight orders cannot be trusted across a crash -> clear flags.
@@ -348,6 +389,7 @@ class TradingEngine:
                         for b in self._feed_close(self.price):   # feed the BAR CLOSE
                             self._process_brick(b)
                     self._maybe_square_off()
+                    self._check_circuit_breaker()
                     # periodic crash-recovery snapshot (~every 15s)
                     self.persist_counter += 1
                     if self.persist_counter >= 15:
@@ -383,6 +425,9 @@ class TradingEngine:
         self.position = None
         self.pending_entry = self.pending_exit = False
         self.squared_off_date = None
+        self.day_key = None
+        self.day_realized = 0.0
+        self.breaker_tripped = False
         self.orders = []
 
     def snapshot(self):
@@ -390,6 +435,9 @@ class TradingEngine:
         total = m["trades"]
         win_rate = round((m["wins"] / total) * 100, 1) if total else 0.0
         ist, today, exp, is_today, past_cut = self._expiry_status()
+        unreal = self.position["unrealized_pnl"] if self.position else 0.0
+        day_real = self.day_realized if self.day_key == today.isoformat() else 0.0
+        breaker = self.breaker_tripped if self.day_key == today.isoformat() else False
         return {
             "running": self.running,
             "mode": self.mode,
@@ -416,6 +464,13 @@ class TradingEngine:
                 "ist_time": ist.strftime("%H:%M:%S"),
                 "entries_blocked": bool(is_today and past_cut),
             },
+            "risk": {
+                "daily_max_loss": self.settings["daily_max_loss"],
+                "circuit_breaker_enabled": self.settings.get("circuit_breaker_enabled", True),
+                "day_realized": round(day_real, 2),
+                "day_total": round(day_real + unreal, 2),
+                "breaker_tripped": breaker,
+            },
             "metrics": {**m, "win_rate": win_rate,
                         "unrealized_pnl": self.position["unrealized_pnl"] if self.position else 0.0},
         }
@@ -434,6 +489,8 @@ class SettingsUpdate(BaseModel):
     greens_to_exit_extended: Optional[int] = None
     square_off_time: Optional[str] = None
     auto_square_off: Optional[bool] = None
+    daily_max_loss: Optional[float] = None
+    circuit_breaker_enabled: Optional[bool] = None
 
 
 class AngelConfig(BaseModel):
@@ -478,6 +535,15 @@ async def square_off():
         return {"ok": False, "message": "No open position to square off."}
     engine._force_exit("MANUAL_SQUAREOFF")
     return {"ok": True, "message": "Square-off order placed (demo)."}
+
+
+@api_router.post("/bot/arm")
+async def arm_breaker():
+    # Manually re-arm the circuit breaker (clears the tripped state).
+    engine.breaker_tripped = False
+    engine.day_key = datetime.now(IST).date().isoformat()
+    await engine._persist_state()
+    return {"ok": True, "message": "Circuit breaker re-armed."}
 
 
 @api_router.get("/trades")
