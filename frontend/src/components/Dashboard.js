@@ -108,9 +108,11 @@ export default function Dashboard() {
 
   const loadHistory = async () => {
     if (!state?.angel?.connected) { toast.error("Connect Angel One first to load history"); return; }
-    toast.info("Loading historical candles from Angel One…");
-    const { data } = await axios.post(`${API}/angel/load-history`, { days: 5 }, { timeout: 60000 });
-    if (data.ok) toast.success(`Loaded ${data.bricks} bricks from ${data.candles} candles`);
+    const now = new Date();
+    const fromDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+    toast.info(`Loading candles since ${fromDate}…`);
+    const { data } = await axios.post(`${API}/angel/load-history`, { from_date: fromDate }, { timeout: 120000 });
+    if (data.ok) toast.success(`Loaded ${data.bricks} bricks from ${data.candles} candles (${data.from} → ${data.to})`);
     else toast.error(data.error || "History load failed");
     poll();
   };

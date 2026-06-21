@@ -149,31 +149,59 @@ class TradingEngine:
             formed.append(self._new_brick("green" if s > 0 else "red", o, c, ts))
         return formed
 
-    # -------- historical backfill (real Angel One 1-min candles) --------
-    async def load_history(self, days=5):
+    # -------- historical backfill (real Angel One 1-min candles, paginated) --------
+    async def load_history(self, days=5, from_date=None):
         if not self.broker.connected:
             return {"ok": False, "error": "Connect Angel One first."}
         now = datetime.now(IST)
-        to_dt = now.strftime("%Y-%m-%d %H:%M")
-        from_dt = (now - timedelta(days=days)).strftime("%Y-%m-%d 09:15")
-        candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE", from_dt, to_dt)
-        if candles is None:
-            return {"ok": False, "error": self.broker.error or "History fetch failed"}
+        if from_date:
+            try:
+                start = datetime.strptime(from_date, "%Y-%m-%d").replace(
+                    hour=9, minute=15, tzinfo=IST)
+            except Exception:
+                return {"ok": False, "error": "Bad from_date (use YYYY-MM-DD)"}
+        else:
+            start = (now - timedelta(days=days)).replace(hour=9, minute=15)
+        # cap total span to ~70 days for sanity
+        if (now - start).days > 70:
+            start = now - timedelta(days=70)
+
+        # Angel caps ONE_MINUTE at ~1500 candles/call (~4 trading days). Paginate in 4-day windows.
+        all_candles = []
+        seen = set()
+        cur = start
+        calls = 0
+        while cur < now and calls < 40:
+            chunk_end = min(cur + timedelta(days=4), now)
+            from_dt = cur.strftime("%Y-%m-%d %H:%M")
+            to_dt = chunk_end.strftime("%Y-%m-%d %H:%M")
+            candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE", from_dt, to_dt)
+            calls += 1
+            if candles:
+                for c in candles:
+                    if c[0] not in seen:
+                        seen.add(c[0])
+                        all_candles.append(c)
+            cur = chunk_end + timedelta(minutes=1)
+            await asyncio.sleep(0.4)  # respect rate limit (3 req/sec)
+
+        if not all_candles:
+            return {"ok": False, "error": self.broker.error or "No historical candles returned"}
+        all_candles.sort(key=lambda c: c[0])
+
         # rebuild the renko chart from real candle closes (no strategy/orders on history)
         self.anchor = None
         self.direction = 0
         self.bricks = []
         self.brick_seq = 0
         last_close = None
-        for c in candles:
-            ts = c[0]
+        for c in all_candles:
             close = float(c[4])
             last_close = close
-            self._feed_close(close, ts)
+            self._feed_close(close, c[0])
         if last_close is not None:
             self.price = self.prev_price = last_close
         self.ticks_in_bar = 0
-        # resync consecutive-brick counters from the tail; flat after history load
         self.consec_red = self.consec_green = self.down_run_reds = 0
         if self.bricks:
             last_color = self.bricks[-1]["color"]
@@ -188,8 +216,9 @@ class TradingEngine:
             else:
                 self.consec_green = run
         await self._persist_state()
-        return {"ok": True, "candles": len(candles), "bricks": len(self.bricks),
-                "from": from_dt, "to": to_dt, "symbol": self.broker.fut_symbol}
+        return {"ok": True, "candles": len(all_candles), "bricks": len(self.bricks),
+                "from": start.strftime("%Y-%m-%d"), "to": now.strftime("%Y-%m-%d"),
+                "symbol": self.broker.fut_symbol}
 
     def _new_brick(self, color, o, c, ts=None):
         self.brick_seq += 1
@@ -649,9 +678,11 @@ async def angel_disconnect():
 
 @api_router.post("/angel/load-history")
 async def angel_load_history(body: dict = None):
-    days = int((body or {}).get("days", 5))
-    days = max(1, min(days, 20))
-    return await engine.load_history(days)
+    body = body or {}
+    from_date = body.get("from_date")
+    days = int(body.get("days", 5))
+    days = max(1, min(days, 70))
+    return await engine.load_history(days=days, from_date=from_date)
 
 
 @api_router.post("/feed/mode")
