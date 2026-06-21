@@ -497,17 +497,22 @@ class TradingEngine:
             await asyncio.sleep(self.settings["tick_interval"])
 
     async def load_metrics(self):
-        cur = self.db.trades.find({}, {"_id": 0})
-        realized = wins = losses = trades = 0
-        async for t in cur:
-            trades += 1
-            realized += t.get("pnl", 0)
-            if t.get("pnl", 0) >= 0:
-                wins += 1
-            else:
-                losses += 1
-        self.metrics = {"realized_pnl": round(realized, 2), "trades": trades,
-                        "wins": wins, "losses": losses}
+        pipeline = [{
+            "$group": {
+                "_id": None,
+                "realized": {"$sum": "$pnl"},
+                "trades": {"$sum": 1},
+                "wins": {"$sum": {"$cond": [{"$gte": ["$pnl", 0]}, 1, 0]}},
+                "losses": {"$sum": {"$cond": [{"$lt": ["$pnl", 0]}, 1, 0]}},
+            }
+        }]
+        res = await self.db.trades.aggregate(pipeline).to_list(1)
+        if res:
+            r = res[0]
+            self.metrics = {"realized_pnl": round(r["realized"], 2), "trades": r["trades"],
+                            "wins": r["wins"], "losses": r["losses"]}
+        else:
+            self.metrics = {"realized_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
 
     def reset(self):
         self.running = False
