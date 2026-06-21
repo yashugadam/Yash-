@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, date, time as dtime
 from zoneinfo import ZoneInfo
+from angel_broker import AngelBroker
 
 
 ROOT_DIR = Path(__file__).parent
@@ -73,7 +74,10 @@ class TradingEngine:
         }
         # runtime
         self.running = False
-        self.mode = "DEMO"  # DEMO only for now
+        self.mode = "DEMO"  # order mode: DEMO/paper only (no real orders placed)
+        self.feed_mode = "SIM"   # SIM (simulated) or LIVE (real Angel One LTP)
+        self.feed_error = ""
+        self.broker = AngelBroker()
         self.angel = {"connected": False, "client_id": "", "api_key": ""}
 
         # price / renko
@@ -374,6 +378,20 @@ class TradingEngine:
             logger.warning("RECOVERED open position from disk: %s", self.position)
         logger.info("Engine state restored (running=%s, bricks=%d)", self.running, len(self.bricks))
 
+    # -------- price source (live Angel LTP or simulated) --------
+    async def _next_price(self):
+        if self.feed_mode == "LIVE" and self.broker.connected:
+            ltp = await asyncio.to_thread(self.broker.get_ltp)
+            if ltp is not None:
+                self.prev_price = self.price
+                self.price = ltp
+                self.feed_error = ""
+            else:
+                self.feed_error = self.broker.error or "No LTP (market closed?)"
+                return  # hold last price; Renko just won't update
+        else:
+            self._gen_price()
+
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
     # (every bar_seconds), using that bar's close price - just like TradingView 1m Renko.
@@ -381,7 +399,7 @@ class TradingEngine:
         while True:
             try:
                 if self.running:
-                    self._gen_price()
+                    await self._next_price()
                     self.ticks_in_bar += 1
                     self._update_unrealized()
                     if self.ticks_in_bar >= self.settings["bar_seconds"]:
@@ -441,7 +459,9 @@ class TradingEngine:
         return {
             "running": self.running,
             "mode": self.mode,
-            "angel": self.angel,
+            "feed_mode": self.feed_mode,
+            "feed_error": self.feed_error,
+            "angel": self.broker.status(),
             "price": round(self.price, 2),
             "prev_price": round(self.prev_price, 2),
             "settings": self.settings,
@@ -559,11 +579,39 @@ async def update_settings(body: SettingsUpdate):
     return engine.settings
 
 
-@api_router.post("/angel/config")
-async def angel_config(body: AngelConfig):
-    # Stored for later use. Bot stays in DEMO mode (no real orders placed).
-    engine.angel = {"connected": False, "client_id": body.client_id, "api_key": body.api_key}
-    return {"ok": True, "mode": "DEMO", "message": "Saved. Bot remains in DEMO mode - no real orders."}
+@api_router.post("/angel/connect")
+async def angel_connect():
+    """Log in to Angel One using credentials from backend .env and switch the
+    price feed to LIVE. Orders still stay in PAPER/DEMO mode (no real orders)."""
+    api_key = os.environ.get("ANGEL_API_KEY", "").strip()
+    client_code = os.environ.get("ANGEL_CLIENT_CODE", "").strip()
+    pin = os.environ.get("ANGEL_PIN", "").strip()
+    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
+    missing = [k for k, v in {
+        "ANGEL_API_KEY": api_key, "ANGEL_CLIENT_CODE": client_code,
+        "ANGEL_PIN": pin, "ANGEL_TOTP_SECRET": totp_secret}.items() if not v]
+    if missing:
+        return {"connected": False, "error": f"Missing credentials in .env: {', '.join(missing)}"}
+    res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
+    if res.get("connected"):
+        engine.feed_mode = "LIVE"
+    return res
+
+
+@api_router.post("/angel/disconnect")
+async def angel_disconnect():
+    await asyncio.to_thread(engine.broker.logout)
+    engine.feed_mode = "SIM"
+    return {"connected": False, "feed_mode": "SIM"}
+
+
+@api_router.post("/feed/mode")
+async def set_feed_mode(body: dict):
+    mode = (body.get("feed_mode") or "SIM").upper()
+    if mode == "LIVE" and not engine.broker.connected:
+        return {"ok": False, "feed_mode": engine.feed_mode, "error": "Connect Angel One first."}
+    engine.feed_mode = "LIVE" if mode == "LIVE" else "SIM"
+    return {"ok": True, "feed_mode": engine.feed_mode}
 
 
 app.include_router(api_router)
