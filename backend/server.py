@@ -64,6 +64,9 @@ class TradingEngine:
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
             "buffer_points": 5,            # SEBI-safe limit buffer (no market orders)
+            "max_slippage": 10,            # hard cap: never fill more than this far from signal (pts)
+            "retry_seconds": 5,            # wait between re-pricing attempts
+            "max_order_attempts": 5,       # max placement attempts before alerting
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
             "greens_to_exit_extended": 2,
             "tick_interval": 1.0,
@@ -99,6 +102,8 @@ class TradingEngine:
         self.position: Optional[Dict[str, Any]] = None
         self.pending_entry = False
         self.pending_exit = False
+        self.exit_retry_pending = False
+        self.alert = None
 
         # books
         self.orders: List[Dict[str, Any]] = []
@@ -253,10 +258,16 @@ class TradingEngine:
                     brick["signal"] = "COVER"
                     asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, brick["index"]))
 
-    # -------- order execution (demo, SEBI-safe limit + 5s retry, duplicate-protected) --------
+    # -------- order execution: escalating limit with hard slippage cap + retries --------
+    async def _cur_price(self):
+        if self.feed_mode == "LIVE" and self.broker.connected:
+            ltp = await asyncio.to_thread(self.broker.get_ltp)
+            if ltp is not None:
+                return ltp
+        return self.price
+
     async def _execute_order(self, side, kind, ref_price, brick_index, reason="SIGNAL"):
-        # Duplicate-order protection: only one order may be in-flight at a time, and we
-        # re-validate state inside the lock so a stale/duplicate trigger is dropped.
+        # Duplicate-order protection: only one order in-flight; re-validate inside the lock.
         async with self.order_lock:
             if kind == "ENTRY" and self.position is not None:
                 logger.warning("Duplicate ENTRY dropped - position already open")
@@ -267,37 +278,70 @@ class TradingEngine:
                 self.pending_exit = False
                 return
 
-            bs_buffer = self.settings["buffer_points"]
-            limit = ref_price - bs_buffer if side == "SELL" else ref_price + bs_buffer
+            base = self.settings["buffer_points"]
+            cap = self.settings.get("max_slippage", 10)        # hard slippage cap (pts)
+            max_attempts = self.settings.get("max_order_attempts", 5)
+            retry_secs = self.settings.get("retry_seconds", 5)
+            # worst acceptable fill = ref +/- cap (never fill beyond this)
+            floor = ref_price - cap                            # SELL won't go below this
+            ceil = ref_price + cap                             # BUY won't go above this
+
             order = {
                 "id": str(uuid.uuid4()), "side": side, "kind": kind, "reason": reason,
                 "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
                 "order_type": "LIMIT", "ref_price": round(ref_price, 2),
-                "limit_price": round(limit, 2), "status": "PENDING", "attempts": 1,
+                "limit_price": None, "status": "PENDING", "attempts": 0,
                 "brick_index": brick_index, "time": now_iso(), "fill_price": None,
                 "note": "Limit order (SEBI compliant - no market order)",
             }
             self.orders.insert(0, order)
             self.orders = self.orders[:60]
 
-            await asyncio.sleep(0.5)  # simulate broker round-trip
-            filled = random.random() < 0.75
-            if not filled:
-                # Not filled -> re-check & re-place after 5 seconds with a wider buffer
-                order["status"] = "RETRYING"
-                order["note"] = "Not filled in 5s - re-checking & re-placing order"
-                await asyncio.sleep(5)
-                order["attempts"] = 2
-                wider = bs_buffer * 2
-                limit = ref_price - wider if side == "SELL" else ref_price + wider
-                order["limit_price"] = round(limit, 2)
+            filled = False
+            for attempt in range(1, max_attempts + 1):
+                buffer = min(base + (attempt - 1) * 5, cap)    # widen 5 -> ... -> cap
+                cur = await self._cur_price()
+                if side == "SELL":
+                    limit = max(round(cur - buffer, 2), round(floor, 2))
+                    can_fill = cur >= limit                    # sell fills if mkt >= limit
+                else:
+                    limit = min(round(cur + buffer, 2), round(ceil, 2))
+                    can_fill = cur <= limit                    # buy fills if mkt <= limit
+                order["attempts"] = attempt
+                order["limit_price"] = limit
+                order["status"] = "PENDING" if attempt == 1 else "RETRYING"
+                await asyncio.sleep(0.5)                        # broker round-trip / fill window
+                if can_fill:
+                    filled = True
+                    break
+                order["note"] = f"Unfilled (slippage > {cap}pt) - re-pricing, attempt {attempt}/{max_attempts}"
+                if attempt < max_attempts:
+                    await asyncio.sleep(retry_secs)
 
-            order["status"] = "COMPLETE"
-            order["fill_price"] = order["limit_price"]
-            order["fill_time"] = now_iso()
-            order["note"] = "Order filled (demo)"
-            self._apply_fill(order)
+            if filled:
+                order["status"] = "COMPLETE"
+                order["fill_price"] = order["limit_price"]
+                order["fill_time"] = now_iso()
+                order["note"] = f"Filled @ {order['limit_price']} (attempt {order['attempts']})"
+                self.exit_retry_pending = False
+                self._apply_fill(order)
+            else:
+                order["status"] = "REJECTED"
+                order["note"] = f"NOT FILLED after {max_attempts} tries - price moved > {cap}pt from signal"
+                if kind == "ENTRY":
+                    self.pending_entry = False
+                    self._set_alert(f"Entry order skipped: price moved > {cap}pt beyond signal "
+                                    f"({ref_price}). No position opened.", "warning")
+                else:  # EXIT must keep trying - position is still open
+                    self.pending_exit = False
+                    self.exit_retry_pending = True
+                    self._set_alert(f"EXIT not filled (>{cap}pt slippage). Position still OPEN - "
+                                    f"auto-retrying every tick.", "error")
         asyncio.create_task(self._persist_state())
+
+    def _set_alert(self, msg, level="info"):
+        self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
+        logger.warning("ALERT(%s): %s", level, msg)
 
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":
@@ -487,6 +531,10 @@ class TradingEngine:
                             self._process_brick(b)
                     self._maybe_square_off()
                     self._check_circuit_breaker()
+                    # keep retrying an exit that failed to fill (position still open)
+                    if self.exit_retry_pending and self.position and not self.pending_exit:
+                        self.pending_exit = True
+                        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
                     # periodic crash-recovery snapshot (~every 15s)
                     self.persist_counter += 1
                     if self.persist_counter >= 15:
@@ -526,6 +574,8 @@ class TradingEngine:
         self.consec_red = self.consec_green = self.down_run_reds = 0
         self.position = None
         self.pending_entry = self.pending_exit = False
+        self.exit_retry_pending = False
+        self.alert = None
         self.squared_off_date = None
         self.day_key = None
         self.day_realized = 0.0
@@ -545,6 +595,7 @@ class TradingEngine:
             "mode": self.mode,
             "feed_mode": self.feed_mode,
             "feed_error": self.feed_error,
+            "alert": self.alert,
             "angel": self.broker.status(),
             "price": round(self.price, 2),
             "prev_price": round(self.prev_price, 2),
@@ -589,6 +640,9 @@ class SettingsUpdate(BaseModel):
     bar_seconds: Optional[int] = None
     lot_size: Optional[int] = None
     buffer_points: Optional[float] = None
+    max_slippage: Optional[float] = None
+    retry_seconds: Optional[float] = None
+    max_order_attempts: Optional[int] = None
     max_red_single_green: Optional[int] = None
     greens_to_exit_extended: Optional[int] = None
     square_off_time: Optional[str] = None

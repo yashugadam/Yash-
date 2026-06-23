@@ -43,6 +43,10 @@ export default function Dashboard() {
           setFlash(data.price > old.price ? "flash-green" : "flash-red");
           setTimeout(() => setFlash(""), 600);
         }
+        if (data.alert && (!old || !old.alert || old.alert.id !== data.alert.id)) {
+          const lvl = data.alert.level === "error" ? "error" : data.alert.level === "warning" ? "warning" : "info";
+          toast[lvl](data.alert.msg, { duration: 8000 });
+        }
         return data;
       });
       if (!form) setForm(data.settings);
@@ -77,6 +81,7 @@ export default function Dashboard() {
     await axios.post(`${API}/settings`, {
       brick_size: Number(form.brick_size), bar_seconds: Number(form.bar_seconds),
       lot_size: Number(form.lot_size), buffer_points: Number(form.buffer_points),
+      max_slippage: Number(form.max_slippage),
       max_red_single_green: Number(form.max_red_single_green),
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
       daily_max_loss: Number(form.daily_max_loss),
@@ -360,8 +365,8 @@ export default function Dashboard() {
                 {[
                   ["Brick Size", "brick_size"], ["Bar Secs", "bar_seconds"],
                   ["Lot Size", "lot_size"], ["Buffer (pt)", "buffer_points"],
-                  ["Max Reds→1G", "max_red_single_green"], ["Greens (ext)", "greens_to_exit_extended"],
-                  ["Day Max Loss ₹", "daily_max_loss"],
+                  ["Max Slip (pt)", "max_slippage"], ["Max Reds→1G", "max_red_single_green"],
+                  ["Greens (ext)", "greens_to_exit_extended"], ["Day Max Loss ₹", "daily_max_loss"],
                 ].map(([label, key]) => (
                   <div key={key}>
                     <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">{label}</label>
