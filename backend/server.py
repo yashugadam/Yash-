@@ -744,6 +744,11 @@ async def angel_connect():
         return {"connected": False, "error": f"Missing credentials in .env: {', '.join(missing)}"}
     res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
     if res.get("connected"):
+        saved = engine.settings.get("instrument_token")
+        if saved:
+            sel = engine.broker.select_instrument(saved)
+            if sel.get("ok"):
+                res["future"] = sel["symbol"]
         engine.feed_mode = "LIVE"
         await engine._persist_state()
     return res
@@ -764,6 +769,29 @@ async def angel_load_history(body: dict = None):
     days = int(body.get("days", 5))
     days = max(1, min(days, 70))
     return await engine.load_history(days=days, from_date=from_date)
+
+
+@api_router.get("/angel/instruments")
+async def angel_instruments(q: str = ""):
+    if not engine.broker.connected:
+        return {"ok": False, "error": "Connect Angel One first.", "items": []}
+    return {"ok": True, "items": engine.broker.search_futures(q)}
+
+
+@api_router.post("/angel/select-instrument")
+async def angel_select_instrument(body: dict):
+    token = str(body.get("token", ""))
+    res = engine.broker.select_instrument(token)
+    if res.get("ok"):
+        engine.settings["instrument_token"] = token
+        # switching contract -> reset the renko chart for the new price series
+        engine.anchor = None
+        engine.direction = 0
+        engine.bricks = []
+        engine.brick_seq = 0
+        engine.consec_red = engine.consec_green = engine.down_run_reds = 0
+        await engine._persist_state()
+    return res
 
 
 @api_router.post("/feed/mode")
@@ -805,9 +833,13 @@ async def _auto_connect_angel():
     if not all([api_key, client_code, pin, totp_secret]):
         return
     res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
-    if res.get("connected") and engine._saved_feed_mode == "LIVE":
-        engine.feed_mode = "LIVE"
-        logger.info("Auto-reconnected Angel One; LIVE feed resumed")
+    if res.get("connected"):
+        saved = engine.settings.get("instrument_token")
+        if saved:
+            engine.broker.select_instrument(saved)   # restore user's chosen contract
+        if engine._saved_feed_mode == "LIVE":
+            engine.feed_mode = "LIVE"
+            logger.info("Auto-reconnected Angel One; LIVE feed resumed")
 
 
 @app.on_event("shutdown")

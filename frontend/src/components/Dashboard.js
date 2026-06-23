@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   Activity, Play, Square, RotateCcw, Settings as SettingsIcon, TrendingDown,
   Zap, ShieldCheck, ChevronUp, ChevronDown, Layers, Lock, Save,
-  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History,
+  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History, Search,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
 
@@ -34,6 +34,26 @@ export default function Dashboard() {
   const [form, setForm] = useState(null);
   const prevPrice = useRef(null);
   const [flash, setFlash] = useState("");
+  const [instQuery, setInstQuery] = useState("");
+  const [instResults, setInstResults] = useState([]);
+  const [showInstSearch, setShowInstSearch] = useState(false);
+
+  const searchInstruments = async (q) => {
+    setInstQuery(q);
+    try {
+      const { data } = await axios.get(`${API}/angel/instruments`, { params: { q } });
+      setInstResults(data.items || []);
+    } catch (e) { setInstResults([]); }
+  };
+
+  const selectInstrument = async (token, symbol) => {
+    const { data } = await axios.post(`${API}/angel/select-instrument`, { token });
+    if (data.ok) {
+      toast.success(`Trading instrument set: ${symbol}`);
+      setShowInstSearch(false); setInstQuery(""); setInstResults([]);
+    } else toast.error(data.error || "Could not select");
+    poll();
+  };
 
   const poll = useCallback(async () => {
     try {
@@ -399,6 +419,33 @@ export default function Dashboard() {
                   <div className="col-span-2"><p className="font-mono text-[10px] uppercase text-slate-400">Future</p><p className="font-mono text-sm font-semibold break-all">{state.angel.future || "—"}</p></div>
                   <div className="col-span-2"><p className="font-mono text-[10px] uppercase text-slate-400">Expiry</p><p className="font-mono text-sm font-semibold">{state.angel.expiry || "—"}</p></div>
                 </div>
+                {/* contract search / selector */}
+                <button onClick={() => { setShowInstSearch(!showInstSearch); if (!showInstSearch) searchInstruments("NIFTY"); }}
+                  data-testid="change-instrument-btn"
+                  className="w-full mt-3 border border-slate-300 hover:bg-slate-50 text-slate-700 font-mono text-[11px] uppercase px-3 py-1.5 transition-colors flex items-center justify-center gap-2">
+                  <Search className="h-3.5 w-3.5" /> Change contract
+                </button>
+                {showInstSearch && (
+                  <div className="mt-2 border border-slate-200 p-2" data-testid="instrument-search">
+                    <input autoFocus value={instQuery} onChange={(e) => searchInstruments(e.target.value)}
+                      placeholder="Search e.g. NIFTY, BANKNIFTY, RELIANCE"
+                      className="w-full border border-slate-300 px-2 py-1.5 font-mono text-xs focus:outline-none focus:border-slate-900" data-testid="instrument-search-input" />
+                    <div className="max-h-44 overflow-y-auto mt-1">
+                      {instResults.length === 0 && <p className="font-mono text-[11px] text-slate-400 text-center py-2">No matches</p>}
+                      {instResults.map((it) => (
+                        <button key={it.token} onClick={() => selectInstrument(it.token, it.symbol)}
+                          data-testid={`instrument-${it.token}`}
+                          className={`w-full text-left px-2 py-1.5 border-b border-slate-100 hover:bg-slate-50 transition-colors ${it.token === state.angel.token ? "bg-blue-50" : ""}`}>
+                          <div className="flex items-center justify-between">
+                            <span className="font-mono text-[11px] font-semibold">{it.symbol}</span>
+                            <span className="font-mono text-[10px] text-slate-400">lot {it.lotsize}</span>
+                          </div>
+                          <span className="font-mono text-[10px] text-slate-400">{it.name} · exp {it.expiry} · {it.type}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <button onClick={disconnectAngel} data-testid="angel-disconnect-button"
                   className="w-full mt-3 border border-red-300 hover:bg-red-50 text-red-700 font-mono text-xs uppercase px-4 py-2 transition-colors">Disconnect</button>
               </div>

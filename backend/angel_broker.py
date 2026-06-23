@@ -34,6 +34,7 @@ class AngelBroker:
         self.fut_token = ""
         self.fut_expiry = ""
         self.fut_lotsize = None
+        self.futures = []
 
     def login(self, api_key, client_code, pin, totp_secret):
         self.error = ""
@@ -73,12 +74,13 @@ class AngelBroker:
             logger.warning("scrip master download failed: %s", e)
             return
         today = date.today()
+        self.futures = []          # cache of tradable NFO futures (NIFTY, BANKNIFTY, stocks…)
         best = None
         best_exp = None
         for r in rows:
-            if r.get("exch_seg") != "NFO" or r.get("instrumenttype") != "FUTIDX":
+            if r.get("exch_seg") != "NFO":
                 continue
-            if r.get("name") != "NIFTY":
+            if r.get("instrumenttype") not in ("FUTIDX", "FUTSTK"):
                 continue
             exp_raw = r.get("expiry", "")
             try:
@@ -87,9 +89,20 @@ class AngelBroker:
                 continue
             if exp < today:
                 continue
-            if best_exp is None or exp < best_exp:
-                best_exp, best = exp, r
-        if best:
+            try:
+                lot = int(r.get("lotsize"))
+            except Exception:
+                lot = None
+            self.futures.append({
+                "symbol": r.get("symbol", ""), "token": str(r.get("token", "")),
+                "name": r.get("name", ""), "expiry": exp, "lotsize": lot,
+                "type": r.get("instrumenttype"),
+            })
+            # default selection = nearest-expiry NIFTY index future
+            if r.get("instrumenttype") == "FUTIDX" and r.get("name") == "NIFTY":
+                if best_exp is None or exp < best_exp:
+                    best_exp, best = exp, r
+        if best and not self.fut_token:
             self.fut_symbol = best.get("symbol", "")
             self.fut_token = str(best.get("token", ""))
             self.fut_expiry = best_exp.isoformat()
@@ -97,6 +110,29 @@ class AngelBroker:
                 self.fut_lotsize = int(best.get("lotsize"))
             except Exception:
                 self.fut_lotsize = None
+
+    def search_futures(self, query="", limit=40):
+        q = (query or "").upper().strip()
+        items = self.futures
+        if q:
+            items = [f for f in items if q in f["symbol"].upper() or q in f["name"].upper()]
+        # index futures first, then by name + expiry
+        items = sorted(items, key=lambda f: (f["type"] != "FUTIDX", f["name"], f["expiry"]))[:limit]
+        return [{"symbol": f["symbol"], "token": f["token"], "name": f["name"],
+                 "expiry": f["expiry"].isoformat(), "lotsize": f["lotsize"], "type": f["type"]}
+                for f in items]
+
+    def select_instrument(self, token):
+        for f in self.futures:
+            if f["token"] == str(token):
+                self.fut_symbol = f["symbol"]
+                self.fut_token = f["token"]
+                self.fut_expiry = f["expiry"].isoformat()
+                self.fut_lotsize = f["lotsize"]
+                logger.info("Instrument selected: %s (%s)", self.fut_symbol, self.fut_token)
+                return {"ok": True, "symbol": self.fut_symbol, "token": self.fut_token,
+                        "expiry": self.fut_expiry, "lotsize": self.fut_lotsize}
+        return {"ok": False, "error": "Instrument not found"}
 
     def relogin(self):
         """Re-establish the session (e.g. after token expiry) using stored creds."""
