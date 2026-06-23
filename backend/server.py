@@ -71,7 +71,7 @@ class TradingEngine:
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
             "greens_to_exit_extended": 2,
             "tick_interval": 1.0,
-            "square_off_time": "15:20",    # IST: auto square-off time on expiry day
+            "square_off_time": "15:00",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
             "daily_max_loss": 10000,       # ₹: auto-stop the bot if day P&L falls to -this
             "circuit_breaker_enabled": True,
@@ -401,12 +401,20 @@ class TradingEngine:
     def _expiry_status(self):
         ist = datetime.now(IST)
         today = ist.date()
-        exp = next_expiry(today)
+        # prefer the SELECTED contract's real expiry (from Angel); fallback to calc
+        exp = None
+        if self.broker.connected and self.broker.fut_expiry:
+            try:
+                exp = date.fromisoformat(self.broker.fut_expiry)
+            except Exception:
+                exp = None
+        if exp is None:
+            exp = next_expiry(today)
         is_today = (today == exp)
         try:
             hh, mm = map(int, str(self.settings["square_off_time"]).split(":"))
         except Exception:
-            hh, mm = 15, 20
+            hh, mm = 15, 0
         past_cut = ist.time() >= dtime(hh, mm)
         return ist, today, exp, is_today, past_cut
 
