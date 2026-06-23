@@ -65,6 +65,7 @@ class TradingEngine:
             "lot_size": 65,
             "buffer_points": 5,            # SEBI-safe limit buffer (no market orders)
             "max_slippage": 10,            # hard cap: never fill more than this far from signal (pts)
+            "forced_exit_slippage": 25,    # wider cap for forced exits (expiry/breaker/manual square-off)
             "retry_seconds": 5,            # wait between re-pricing attempts
             "max_order_attempts": 5,       # max placement attempts before alerting
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
@@ -103,6 +104,7 @@ class TradingEngine:
         self.pending_entry = False
         self.pending_exit = False
         self.exit_retry_pending = False
+        self.forced_exit_pending = False
         self.alert = None
 
         # books
@@ -279,7 +281,10 @@ class TradingEngine:
                 return
 
             base = self.settings["buffer_points"]
-            cap = self.settings.get("max_slippage", 10)        # hard slippage cap (pts)
+            forced = reason in ("EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF") \
+                or (kind == "EXIT" and self.forced_exit_pending)
+            cap = self.settings.get("forced_exit_slippage", 25) if forced \
+                else self.settings.get("max_slippage", 10)   # hard slippage cap (pts)
             max_attempts = self.settings.get("max_order_attempts", 5)
             retry_secs = self.settings.get("retry_seconds", 5)
             # worst acceptable fill = ref +/- cap (never fill beyond this)
@@ -324,6 +329,8 @@ class TradingEngine:
                 order["fill_time"] = now_iso()
                 order["note"] = f"Filled @ {order['limit_price']} (attempt {order['attempts']})"
                 self.exit_retry_pending = False
+                if kind == "EXIT":
+                    self.forced_exit_pending = False
                 self._apply_fill(order)
             else:
                 order["status"] = "REJECTED"
@@ -447,6 +454,7 @@ class TradingEngine:
         if not self.position or self.pending_exit:
             return
         self.pending_exit = True
+        self.forced_exit_pending = True
         asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, reason))
 
     # -------- crash / restart recovery --------
@@ -575,6 +583,7 @@ class TradingEngine:
         self.position = None
         self.pending_entry = self.pending_exit = False
         self.exit_retry_pending = False
+        self.forced_exit_pending = False
         self.alert = None
         self.squared_off_date = None
         self.day_key = None
@@ -641,6 +650,7 @@ class SettingsUpdate(BaseModel):
     lot_size: Optional[int] = None
     buffer_points: Optional[float] = None
     max_slippage: Optional[float] = None
+    forced_exit_slippage: Optional[float] = None
     retry_seconds: Optional[float] = None
     max_order_attempts: Optional[int] = None
     max_red_single_green: Optional[int] = None
