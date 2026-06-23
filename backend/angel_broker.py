@@ -34,6 +34,8 @@ class AngelBroker:
         self.fut_token = ""
         self.fut_expiry = ""
         self.fut_lotsize = None
+        self.fut_name = ""
+        self.fut_type = ""
         self.futures = []
 
     def login(self, api_key, client_code, pin, totp_secret):
@@ -106,6 +108,8 @@ class AngelBroker:
             self.fut_symbol = best.get("symbol", "")
             self.fut_token = str(best.get("token", ""))
             self.fut_expiry = best_exp.isoformat()
+            self.fut_name = best.get("name", "NIFTY")
+            self.fut_type = best.get("instrumenttype", "FUTIDX")
             try:
                 self.fut_lotsize = int(best.get("lotsize"))
             except Exception:
@@ -129,10 +133,28 @@ class AngelBroker:
                 self.fut_token = f["token"]
                 self.fut_expiry = f["expiry"].isoformat()
                 self.fut_lotsize = f["lotsize"]
+                self.fut_name = f["name"]
+                self.fut_type = f["type"]
                 logger.info("Instrument selected: %s (%s)", self.fut_symbol, self.fut_token)
                 return {"ok": True, "symbol": self.fut_symbol, "token": self.fut_token,
                         "expiry": self.fut_expiry, "lotsize": self.fut_lotsize}
         return {"ok": False, "error": "Instrument not found"}
+
+    def roll_to_next(self):
+        """Switch to the nearest non-expired contract of the same underlying (auto-roll)."""
+        if not self.futures:
+            return {"ok": False, "error": "no futures cache"}
+        today = date.today()
+        cands = sorted(
+            [f for f in self.futures if f["name"] == self.fut_name
+             and f["type"] == self.fut_type and f["expiry"] >= today],
+            key=lambda f: f["expiry"])
+        if not cands:
+            return {"ok": False, "error": "no next contract found"}
+        nxt = cands[0]
+        if nxt["token"] == self.fut_token:
+            return {"ok": False, "error": "already on current contract"}
+        return self.select_instrument(nxt["token"])
 
     def relogin(self):
         """Re-establish the session (e.g. after token expiry) using stored creds."""

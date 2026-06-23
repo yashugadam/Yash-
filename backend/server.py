@@ -73,6 +73,7 @@ class TradingEngine:
             "tick_interval": 1.0,
             "square_off_time": "15:00",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
+            "auto_roll": True,             # auto-switch to next month once current contract expires
             "daily_max_loss": 10000,       # ₹: auto-stop the bot if day P&L falls to -this
             "circuit_breaker_enabled": True,
         }
@@ -465,6 +466,36 @@ class TradingEngine:
         self.forced_exit_pending = True
         asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, reason))
 
+    def _maybe_auto_roll(self):
+        """Once the active contract has expired, auto-switch to the next month."""
+        if not self.settings.get("auto_roll", True):
+            return
+        if not self.broker.connected or not self.broker.fut_expiry:
+            return
+        if self.position or self.pending_exit or self.pending_entry:
+            return  # never roll mid-trade
+        try:
+            exp = date.fromisoformat(self.broker.fut_expiry)
+        except Exception:
+            return
+        if exp < datetime.now(IST).date():
+            res = self.broker.roll_to_next()
+            if res.get("ok"):
+                self.settings["instrument_token"] = res["token"]
+                self.anchor = None
+                self.direction = 0
+                self.bricks = []
+                self.brick_seq = 0
+                self.consec_red = self.consec_green = self.down_run_reds = 0
+                self.squared_off_date = None
+                self._set_alert(f"Auto-rolled to next contract: {res['symbol']} "
+                                f"(previous expired). Chart reset for new series.", "info")
+                asyncio.create_task(self._persist_state())
+                asyncio.create_task(self._autoload_after_roll())
+
+    async def _autoload_after_roll(self):
+        await self.load_history(days=5)
+
     # -------- crash / restart recovery --------
     def _state_doc(self):
         return {
@@ -547,6 +578,7 @@ class TradingEngine:
                             self._process_brick(b)
                     self._maybe_square_off()
                     self._check_circuit_breaker()
+                    self._maybe_auto_roll()
                     # keep retrying an exit that failed to fill (position still open)
                     if self.exit_retry_pending and self.position and not self.pending_exit:
                         self.pending_exit = True
@@ -632,6 +664,7 @@ class TradingEngine:
                 "is_today": is_today,
                 "square_off_time": self.settings["square_off_time"],
                 "auto_square_off": self.settings.get("auto_square_off", True),
+                "auto_roll": self.settings.get("auto_roll", True),
                 "squared_off": self.squared_off_date == str(today),
                 "ist_time": ist.strftime("%H:%M:%S"),
                 "entries_blocked": bool(is_today and past_cut),
@@ -665,6 +698,7 @@ class SettingsUpdate(BaseModel):
     greens_to_exit_extended: Optional[int] = None
     square_off_time: Optional[str] = None
     auto_square_off: Optional[bool] = None
+    auto_roll: Optional[bool] = None
     daily_max_loss: Optional[float] = None
     circuit_breaker_enabled: Optional[bool] = None
 

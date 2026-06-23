@@ -324,7 +324,7 @@ export default function Dashboard() {
             {state.expiry.squared_off && (
               <p className="font-mono text-[10px] text-red-600 mt-2 flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Squared off for expiry — new entries blocked today</p>
             )}
-            <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits any open position at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days.</p>
+            <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits any open position at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days. {state.expiry.auto_roll ? "Auto-rolls to next month after expiry." : "Manual roll."}</p>
           </Widget>
 
           {/* Risk / Circuit Breaker */}
