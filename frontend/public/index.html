@@ -4,7 +4,16 @@
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="theme-color" content="#000000" />
-        <meta name="description" content="A product of emergent.sh" />
+        <meta name="description" content="Renko Nifty Bot is an automated NIFTY Futures algo trading dashboard that runs a 50-point Renko brick, 1-minute strategy with real-money order execution via Angel One SmartAPI, broker reconciliation, and live order logging." />
+        <meta name="robots" content="index, follow" />
+        <link rel="canonical" href="https://renko-nifty-bot.emergent.host/" />
+        <meta property="og:type" content="website" />
+        <meta property="og:title" content="Renko Nifty Bot — Automated NIFTY Futures Algo Trading" />
+        <meta property="og:description" content="Renko-chart algorithmic trading bot for NIFTY Futures with real-money execution on Angel One SmartAPI, broker reconciliation, and live order logs." />
+        <meta property="og:url" content="https://renko-nifty-bot.emergent.host/" />
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta name="twitter:title" content="Renko Nifty Bot — Automated NIFTY Futures Algo Trading" />
+        <meta name="twitter:description" content="Renko-chart algorithmic trading bot for NIFTY Futures with real-money execution on Angel One SmartAPI." />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
@@ -21,12 +30,20 @@
         work correctly both with client-side routing and a non-root public URL.
         Learn how to configure a non-root public URL by running `npm run build`.
         -->
-        <title>Emergent | Fullstack App</title>
+        <title>Renko Nifty Bot — Automated NIFTY Futures Algo Trading</title>
         <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);</script>
         <script src="https://assets.emergent.sh/scripts/emergent-main.js"></script>
     </head>
     <body>
-        <noscript>You need to enable JavaScript to run this app.</noscript>
+        <noscript>
+            Renko Nifty Bot is an automated NIFTY Futures algorithmic trading
+            dashboard. It builds Renko bricks (50-point brick size, 1-minute
+            timeframe) from live market data and places real-money orders through
+            the Angel One SmartAPI. The strategy enters short positions when two
+            red bricks form and exits on green-brick reversals, with broker
+            reconciliation, an auto-reconnect watchdog, and a live order and
+            rejection log. Please enable JavaScript to use the trading dashboard.
+        </noscript>
         <div id="root"></div>
         <!--
       This HTML file is a template.

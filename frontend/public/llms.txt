@@ -1,0 +1,20 @@
+# Renko Nifty Bot
+
+> Automated NIFTY Futures algorithmic trading bot that executes a Renko-chart strategy (50-point brick size, 1-minute timeframe) on the Angel One SmartAPI with real-money order execution.
+
+## Overview
+
+Renko Nifty Bot is a full-stack algorithmic trading application. It builds Renko bricks from live NIFTY Futures market data and places real orders through a SEBI-compliant static-IP routed connection to Angel One. The bot enters short trades when two red bricks form and manages exits based on green-brick reversal rules.
+
+## Key Features
+
+- Live Renko chart (50-point brick, 1-minute close) with interactive zoom and pan
+- Short-entry strategy on consecutive red bricks with green-brick exit logic
+- Real-money order placement via Angel One SmartAPI
+- Broker reconciliation panel to recover missed fills on restart
+- Auto-reconnect watchdog for Angel One websocket drops
+- Order and rejection log
+
+## Notes
+
+This is a private trading dashboard application and is not intended as public financial advice.
