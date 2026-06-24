@@ -78,11 +78,11 @@ export default function Dashboard() {
         return data;
       });
       if (!form) setForm(data.settings);
-    } catch (e) { /* ignore transient */ }
+    } catch (e) { console.debug("poll failed (transient):", e?.message); }
   }, [form]);
 
   const loadTrades = useCallback(async () => {
-    try { const { data } = await axios.get(`${API}/trades`); setTrades(data); } catch (e) {}
+    try { const { data } = await axios.get(`${API}/trades`); setTrades(data); } catch (e) { console.debug("loadTrades failed (transient):", e?.message); }
   }, []);
 
   useEffect(() => {

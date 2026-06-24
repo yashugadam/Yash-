@@ -8,7 +8,7 @@ import random
 import calendar
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, date, time as dtime, timedelta

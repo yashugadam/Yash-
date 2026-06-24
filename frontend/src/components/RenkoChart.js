@@ -57,7 +57,7 @@ export const RenkoChart = ({ bricks, trades }) => {
       const top = yScale(Math.max(b.open, b.close));
       const bottom = yScale(Math.min(b.open, b.close));
       return { x: leftPad + i * step, y: top, h: Math.max(bottom - top, 2),
-        color: b.color, signal: b.signal, time: b.time, open: b.open, close: b.close };
+        index: b.index, color: b.color, signal: b.signal, time: b.time, open: b.open, close: b.close };
     });
 
     const stepP = (max - min) / 6;
@@ -206,8 +206,8 @@ export const RenkoChart = ({ bricks, trades }) => {
           {levels.map((l, i) => (
             <line key={`lv-${i}`} x1={0} x2={svgW - rightAxis} y1={l.y} y2={l.y} stroke="#F1F5F9" strokeWidth="1" />
           ))}
-          {rects.map((r, i) => (
-            <g key={i}>
+          {rects.map((r) => (
+            <g key={`brick-${r.index}`}>
               <title>{fmtDate(r.time)} {fmtTime(r.time)} · {r.open} → {r.close}</title>
               <rect x={r.x} y={r.y} width={brickW} height={r.h}
                 fill={r.color === "green" ? "#10B981" : "#EF4444"}
@@ -259,8 +259,8 @@ export const RenkoChart = ({ bricks, trades }) => {
       {/* fixed right-side price axis */}
       <div className="pointer-events-none absolute top-0 right-0 h-full" style={{ width: rightAxis }}>
         <svg width={rightAxis} height={H} className="block bg-white border-l border-slate-100">
-          {levels.map((l, i) => (
-            <text key={i} x={6} y={l.y + 4} fontSize="10" fontFamily="IBM Plex Mono" fill="#64748B">{l.price}</text>
+          {levels.map((l) => (
+            <text key={`px-${l.price}`} x={6} y={l.y + 4} fontSize="10" fontFamily="IBM Plex Mono" fill="#64748B">{l.price}</text>
           ))}
         </svg>
       </div>
