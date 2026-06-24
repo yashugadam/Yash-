@@ -35,5 +35,9 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 - P2: Split backend into engine.py / routes.py / models.py; Pydantic Trade model.
 - P2: Historical analytics (equity curve, per-day P&L).
 
+## Implemented (2026-06-24)
+- **Stop-button confirmation**: clicking Stop now opens a confirmation dialog. On confirm, if a position is open it force-exits (square-off, MANUAL_SQUAREOFF, 25-pt forced slippage cap) and then halts; if flat it just stops. Backend `/api/bot/stop` accepts `{square_off: bool}` → returns `{running, squared_off}`. Prevents accidental halts that disable safety logic.
+- **Aggressive re-entry**: entry condition changed from exactly 2 reds (`consec_red == 2`) to `consec_red >= 2`. If the bot (re)starts mid-downtrend with a run already >2 reds, it enters SHORT immediately on the next red instead of waiting for a green reset — so an in-progress downtrend isn't missed (user-requested). `down_run_reds` now seeds from the actual red run so the exit rule (>4 reds → 2 greens) stays correct.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).

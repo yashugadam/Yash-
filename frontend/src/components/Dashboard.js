@@ -7,6 +7,10 @@ import {
   CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History, Search,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter,
+  AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel,
+} from "@/components/ui/alert-dialog";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -37,6 +41,7 @@ export default function Dashboard() {
   const [instQuery, setInstQuery] = useState("");
   const [instResults, setInstResults] = useState([]);
   const [showInstSearch, setShowInstSearch] = useState(false);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
 
   const searchInstruments = async (q) => {
     setInstQuery(q);
@@ -85,10 +90,19 @@ export default function Dashboard() {
   }, [poll, loadTrades]);
 
   const startStop = async () => {
-    const running = state?.running;
-    await axios.post(`${API}/bot/${running ? "stop" : "start"}`);
-    toast[running ? "info" : "success"](running ? "Bot stopped" : "Bot started — feeding live ticks");
+    if (state?.running) { setShowStopConfirm(true); return; }
+    await axios.post(`${API}/bot/start`);
+    toast.success("Bot started — feeding live ticks");
     poll();
+  };
+
+  const confirmStop = async () => {
+    setShowStopConfirm(false);
+    const hadPosition = !!state?.position;
+    const { data } = await axios.post(`${API}/bot/stop`, { square_off: true });
+    if (data.squared_off) toast.info("Position squared off (forced exit) — bot stopped");
+    else toast.info(hadPosition ? "Bot stopped" : "Bot stopped — no open position");
+    poll(); loadTrades();
   };
 
   const reset = async () => {
@@ -203,6 +217,35 @@ export default function Dashboard() {
           </button>
         </div>
       </header>
+
+      <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
+        <AlertDialogContent data-testid="stop-confirm-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-red-600" /> Stop the bot?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {state?.position ? (
+                <>
+                  You currently have an <b>OPEN SHORT position</b> ({state.position.qty} qty).
+                  Confirming will <b>force-exit (square off) this trade now</b> at market — even
+                  though the green-brick exit condition has not been met — and then stop the bot.
+                  While stopped, auto-exit, the circuit breaker and expiry square-off are disabled.
+                </>
+              ) : (
+                <>No open position. The bot will simply stop feeding and watching the market. No new entries will be taken until you start again.</>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="stop-cancel-button">Keep running</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmStop} data-testid="stop-confirm-button"
+              className="bg-red-600 hover:bg-red-700">
+              {state?.position ? "Square off & Stop" : "Stop bot"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Main grid */}
       <main className="grid grid-cols-1 lg:grid-cols-4 gap-4 p-4">

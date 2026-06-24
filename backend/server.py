@@ -245,8 +245,12 @@ class TradingEngine:
             self.consec_green = 0
             if self.position or self.pending_entry:
                 self.down_run_reds += 1
-            elif self.consec_red == 2 and not self._entries_blocked():
-                self.down_run_reds = 2
+            elif self.consec_red >= 2 and not (self.position or self.pending_entry) \
+                    and not self._entries_blocked():
+                # Aggressive entry: short on 2+ reds. If the bot (re)starts mid-downtrend
+                # with a run already >2 reds, it enters immediately on the next red instead
+                # of waiting for a green reset — so an in-progress downtrend isn't missed.
+                self.down_run_reds = self.consec_red
                 self.pending_entry = True
                 brick["signal"] = "SHORT"
                 asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
@@ -725,11 +729,19 @@ async def start_bot():
     return {"running": True}
 
 
+class StopRequest(BaseModel):
+    square_off: Optional[bool] = False
+
+
 @api_router.post("/bot/stop")
-async def stop_bot():
+async def stop_bot(req: StopRequest = StopRequest()):
+    squared = False
+    if req.square_off and engine.position and not engine.pending_exit:
+        engine._force_exit("MANUAL_SQUAREOFF")  # force-cover open position before halting
+        squared = True
     engine.running = False
     await engine._persist_state()
-    return {"running": False}
+    return {"running": False, "squared_off": squared}
 
 
 @api_router.post("/bot/reset")
