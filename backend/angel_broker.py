@@ -178,7 +178,8 @@ class AngelBroker:
             try:
                 res = self.smart.ltpData("NFO", self.fut_symbol, self.fut_token)
                 if res.get("status"):
-                    return float(res["data"]["ltp"])
+                    # round LTP to a whole number (ignore paise/decimals, e.g. 23890.30 -> 23890)
+                    return float(round(float(res["data"]["ltp"])))
                 self.error = str(res.get("message") or res)
             except Exception as e:
                 self.error = str(e)

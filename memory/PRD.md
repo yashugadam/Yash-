@@ -60,5 +60,8 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 - **Persistent Order Log**: every terminal order (COMPLETE/REJECTED) is saved to Mongo `order_log` with the **exact Angel One rejection reason** in `note`. New `GET /api/orders/log` endpoint + an "Order Log" UI widget (Time/Side/Type/Status/Limit/Fill/Reason). Rejection alerts now surface Angel's real error text. Settings endpoint persists; `/bot/reset` also clears order_log.
 - **Tick-size fix** (earlier this session): all order prices rounded to nearest 0.05 (`round_to_tick`) — fixes the most common Angel One LIMIT rejection.
 
+## Implemented (2026-06-24) — LTP rounding
+- **Live LTP rounded to whole number** in `angel_broker.get_ltp` (e.g. 23890.30 → 23890). Cleaner brick levels and tick-aligned order prices.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).
