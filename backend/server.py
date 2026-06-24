@@ -448,6 +448,49 @@ class TradingEngine:
             return {"ok": True, "message": "Marked as reconciled."}
         return {"ok": False, "message": "Unknown action."}
 
+    async def manual_order(self, side, qty=None):
+        """Place a single REAL one-off LIMIT order near LTP for manual/test use.
+        Independent of the strategy state machine (does not set engine.position)."""
+        if not self.broker.connected:
+            return {"ok": False, "message": "Angel One not connected — cannot place order."}
+        qty = int(qty or self.settings["lot_size"])
+        cur = await self._cur_price()
+        buf = self.settings.get("max_slippage", 20)
+        limit = cur + buf if side == "BUY" else cur - buf   # marketable limit for a quick fill
+        order = {
+            "id": str(uuid.uuid4()), "side": side, "kind": "MANUAL", "reason": "MANUAL_TEST",
+            "qty": qty, "symbol": self.settings["symbol"], "order_type": "LIMIT",
+            "ref_price": round(cur, 2), "limit_price": round(limit, 2), "status": "PENDING",
+            "attempts": 1, "brick_index": -1, "time": now_iso(), "fill_price": None,
+            "mode": "LIVE", "broker_order_id": None, "note": "Manual order",
+        }
+        self.orders.insert(0, order)
+        self.orders = self.orders[:60]
+        res = await asyncio.to_thread(self.broker.place_limit_order, side, limit, qty)
+        if not res.get("ok"):
+            order["status"] = "REJECTED"
+            order["note"] = f"Broker reject: {res.get('error')}"
+            await self._save_order(order)
+            return {"ok": False, "message": res.get("error"), "note": order["note"]}
+        oid = res.get("orderid")
+        order["broker_order_id"] = oid
+        await asyncio.sleep(2)                               # let it work
+        st = await asyncio.to_thread(self.broker.get_order_status, oid)
+        s = (st.get("status") or "").lower()
+        if "complet" in s or "executed" in s or "filled" in s:
+            order["status"] = "COMPLETE"
+            order["fill_price"] = st.get("avgprice") or limit
+            order["note"] = f"MANUAL {side} filled @ {order['fill_price']} (order {oid})"
+        elif "reject" in s or "cancel" in s:
+            order["status"] = "REJECTED"
+            order["note"] = f"Broker {s}: {st.get('text', '')}"
+        else:
+            order["status"] = st.get("status") or "OPEN"
+            order["note"] = f"MANUAL {side} placed (order {oid}); status: {order['status']}"
+        await self._save_order(order)
+        return {"ok": True, "order_status": order["status"], "limit_price": order["limit_price"],
+                "fill_price": order["fill_price"], "broker_order_id": oid, "note": order["note"]}
+
     async def _maybe_enter_on_start(self):
         """On Start (catching up to a move already in progress): mirror the EXIT rule to
         decide if a down-move is still 'short-biased'. Look at the most recent red down-run
@@ -961,6 +1004,14 @@ async def get_trades():
 @api_router.get("/orders/log")
 async def get_order_log():
     return await db.order_log.find({}, {"_id": 0}).sort("time", -1).to_list(150)
+
+
+@api_router.post("/orders/manual")
+async def post_manual_order(body: dict):
+    side = (body.get("side") or "").upper()
+    if side not in ("BUY", "SELL"):
+        return {"ok": False, "message": "side must be BUY or SELL"}
+    return await engine.manual_order(side, body.get("qty"))
 
 
 @api_router.post("/settings")
