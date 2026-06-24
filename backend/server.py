@@ -333,13 +333,13 @@ class TradingEngine:
                     order["note"] = f"NOT FILLED after {max_attempts} tries - price moved > {cap}pt from signal"
                 if kind == "ENTRY":
                     self.pending_entry = False
-                    self._set_alert(f"Entry order skipped: not filled within {cap}pt of signal "
-                                    f"({ref_price}). No position opened.", "warning")
+                    self._set_alert(f"ENTRY order failed — {order.get('note', 'unknown reason')}. "
+                                    f"No position opened.", "warning")
                 else:  # EXIT must keep trying - position is still open
                     self.pending_exit = False
                     self.exit_retry_pending = True
-                    self._set_alert(f"EXIT not filled (>{cap}pt slippage). Position still OPEN - "
-                                    f"auto-retrying every tick.", "error")
+                    self._set_alert(f"EXIT order failed — {order.get('note', 'unknown reason')}. "
+                                    f"Position still OPEN — auto-retrying every tick.", "error")
         asyncio.create_task(self._persist_state())
 
     def _set_alert(self, msg, level="info"):

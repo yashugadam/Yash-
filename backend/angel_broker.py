@@ -18,6 +18,14 @@ SCRIP_MASTER_URL = (
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 )
 
+TICK_SIZE = 0.05   # NSE/NFO price tick — all order prices must be a multiple of this
+
+
+def round_to_tick(price, tick=TICK_SIZE):
+    """Round a price to the nearest valid exchange tick (0.05). Angel One rejects
+    LIMIT orders whose price is not a multiple of the tick size."""
+    return round(round(float(price) / tick) * tick, 2)
+
 
 class AngelBroker:
     def __init__(self):
@@ -219,7 +227,7 @@ class AngelBroker:
             "ordertype": "LIMIT",
             "producttype": "CARRYFORWARD",   # overnight carry-forward (NRML)
             "duration": "DAY",
-            "price": str(round(float(price), 2)),
+            "price": str(round_to_tick(price)),
             "quantity": str(int(quantity)),
             "squareoff": "0",
             "stoploss": "0",
@@ -254,7 +262,7 @@ class AngelBroker:
             "ordertype": "LIMIT",
             "producttype": "CARRYFORWARD",
             "duration": "DAY",
-            "price": str(round(float(price), 2)),
+            "price": str(round_to_tick(price)),
             "quantity": str(int(quantity)),
         }
         try:
