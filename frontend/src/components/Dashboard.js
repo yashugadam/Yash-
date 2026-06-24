@@ -290,13 +290,19 @@ export default function Dashboard() {
             <AlertDialogDescription>
               The bot will place <b>REAL orders on your Angel One account using real money</b>.
               Orders are CARRYFORWARD (NRML) LIMIT orders on {state.angel?.future || "the selected future"}.
-              Make sure the price feed is LIVE and the correct contract is selected. You can switch back to PAPER anytime.
+              You can switch back to PAPER anytime.
+              {(!state.angel?.connected || state.feed_mode !== "LIVE") && (
+                <span className="block mt-2 text-red-600 font-semibold" data-testid="live-not-ready-note">
+                  ⚠ Not ready for LIVE: {!state.angel?.connected ? "connect Angel One" : "switch the price feed to LIVE"} first.
+                </span>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel data-testid="live-cancel-button">Stay on Paper</AlertDialogCancel>
             <AlertDialogAction onClick={() => setTradeMode("LIVE")} data-testid="live-confirm-button"
-              className="bg-red-600 hover:bg-red-700">
+              disabled={!state.angel?.connected || state.feed_mode !== "LIVE"}
+              className="bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:pointer-events-none">
               Enable LIVE
             </AlertDialogAction>
           </AlertDialogFooter>
