@@ -6,6 +6,7 @@ futures LTP. Order placement is intentionally NOT wired to real placeOrder yet
 and must be invoked from the engine via asyncio.to_thread.
 """
 import logging
+import os
 from datetime import datetime, date
 
 import pyotp
@@ -13,6 +14,15 @@ import requests
 from SmartApi import SmartConnect
 
 logger = logging.getLogger("renko-bot.angel")
+
+
+def _angel_proxies():
+    """If ANGEL_PROXY_URL is set, route ALL Angel One API calls through it so Angel
+    sees the proxy's (whitelisted static) IP instead of the app server's shared IP.
+    Format: http://USER:PASS@HOST:PORT  (or http://HOST:PORT for an open proxy)."""
+    url = os.environ.get("ANGEL_PROXY_URL", "").strip()
+    return {"http": url, "https": url} if url else {}
+
 
 SCRIP_MASTER_URL = (
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -50,7 +60,7 @@ class AngelBroker:
         self.error = ""
         self.api_key, self.client_code, self._pin, self._totp = api_key, client_code, pin, totp_secret
         try:
-            self.smart = SmartConnect(api_key=api_key)
+            self.smart = SmartConnect(api_key=api_key, proxies=_angel_proxies())
             otp = pyotp.TOTP(totp_secret).now()
             data = self.smart.generateSession(client_code, pin, otp)
             if not data.get("status"):
