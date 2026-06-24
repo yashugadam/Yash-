@@ -55,5 +55,10 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 - **Frontend**: removed PAPER/LIVE toggle, SIM/LIVE feed toggle, and the LIVE-enable dialog. Header now shows static "LIVE · REAL MONEY" + "LIVE DATA/Disconnected" badges. Added a **Start confirmation dialog** (warns real money + immediate entry). Kept all safety controls (Stop-confirm + force square-off, ₹10k breaker, expiry square-off, reconciliation).
 - **Testing note**: verified via screenshots + curl (UI renders, toggles gone, Start dialog works, backend LIVE + connected + buffer=20). Real order PLACEMENT was NOT executed in testing (real money + market open) — must be validated by user with a supervised 1-lot live trade.
 
+## Implemented (2026-06-24) — Exit boundary + Order Log
+- **Exit rule changed to Option B**: red count (incl. the 2 entry reds) of **≥ 4 → wait for 2 greens**; **< 4 (i.e. 2–3) → exit on 1st green**. One-line change `down_run_reds > max_red_single_green` → `>=`.
+- **Persistent Order Log**: every terminal order (COMPLETE/REJECTED) is saved to Mongo `order_log` with the **exact Angel One rejection reason** in `note`. New `GET /api/orders/log` endpoint + an "Order Log" UI widget (Time/Side/Type/Status/Limit/Fill/Reason). Rejection alerts now surface Angel's real error text. Settings endpoint persists; `/bot/reset` also clears order_log.
+- **Tick-size fix** (earlier this session): all order prices rounded to nearest 0.05 (`round_to_tick`) — fixes the most common Angel One LIMIT rejection.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).

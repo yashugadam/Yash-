@@ -45,6 +45,7 @@ export default function Dashboard() {
   const [showStartConfirm, setShowStartConfirm] = useState(false);
   const [recon, setRecon] = useState(null);
   const [reconBusy, setReconBusy] = useState(false);
+  const [orderLog, setOrderLog] = useState([]);
 
   const searchInstruments = async (q) => {
     setInstQuery(q);
@@ -85,12 +86,16 @@ export default function Dashboard() {
     try { const { data } = await axios.get(`${API}/trades`); setTrades(data); } catch (e) { console.debug("loadTrades failed (transient):", e?.message); }
   }, []);
 
+  const loadOrderLog = useCallback(async () => {
+    try { const { data } = await axios.get(`${API}/orders/log`); setOrderLog(data); } catch (e) { console.debug("loadOrderLog failed (transient):", e?.message); }
+  }, []);
+
   useEffect(() => {
-    poll(); loadTrades();
+    poll(); loadTrades(); loadOrderLog();
     const a = setInterval(poll, 1000);
-    const b = setInterval(loadTrades, 3000);
+    const b = setInterval(() => { loadTrades(); loadOrderLog(); }, 3000);
     return () => { clearInterval(a); clearInterval(b); };
-  }, [poll, loadTrades]);
+  }, [poll, loadTrades, loadOrderLog]);
 
   const startStop = () => {
     if (state?.running) { setShowStopConfirm(true); return; }
@@ -334,6 +339,40 @@ export default function Dashboard() {
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{t.reds}</td>
                       <td className={`font-mono text-xs px-3 py-2 border-b border-slate-100 font-semibold ${pnlClass(t.pnl)}`}>{sign(t.pnl)}{fmt(t.pnl)}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400">{new Date(t.exit_time).toLocaleTimeString("en-IN")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Widget>
+
+          <Widget title="Order Log" testid="order-log-widget"
+            icon={<History className="h-3.5 w-3.5 text-slate-500" />}
+            right={<span className="font-mono text-[11px] text-slate-400">{orderLog.length} orders · rejections shown</span>}>
+            <div className="overflow-x-auto max-h-[280px] overflow-y-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead className="sticky top-0">
+                  <tr>
+                    {["Time", "Side", "Type", "Status", "Limit", "Fill", "Reason / Reject detail"].map((h) => (
+                      <th key={h} className="text-[10px] uppercase text-slate-500 bg-slate-50 px-3 py-2 font-mono text-left border-b border-slate-200">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderLog.length === 0 && (
+                    <tr><td colSpan={7} className="text-center py-8 font-mono text-xs text-slate-400">No orders yet — placed orders & rejection reasons will appear here</td></tr>
+                  )}
+                  {orderLog.map((o) => (
+                    <tr key={o.id} className="hover:bg-slate-50 transition-colors" data-testid={`order-row-${o.id}`}>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400 whitespace-nowrap">{o.time ? new Date(o.time).toLocaleTimeString("en-IN") : "--"}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.side}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.kind}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">
+                        <span className={`px-1.5 py-0.5 border ${o.status === "COMPLETE" ? "bg-emerald-50 text-emerald-700 border-emerald-100" : "bg-red-50 text-red-600 border-red-100"}`}>{o.status}</span>
+                      </td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{fmt(o.limit_price)}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.fill_price ? fmt(o.fill_price) : "--"}</td>
+                      <td className={`font-mono text-[11px] px-3 py-2 border-b border-slate-100 ${o.status === "REJECTED" ? "text-red-600" : "text-slate-500"}`} title={o.note}>{o.note}</td>
                     </tr>
                   ))}
                 </tbody>

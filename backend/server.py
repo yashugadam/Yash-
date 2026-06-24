@@ -251,8 +251,10 @@ class TradingEngine:
             self.consec_green += 1
             self.consec_red = 0
             if self.position and not self.pending_exit:
+                # Option B: 4 or more reds (incl. the 2 entry reds) -> wait for 2 greens;
+                # fewer than 4 reds (i.e. 2 or 3) -> exit on the 1st green.
                 need = self.settings["greens_to_exit_extended"] \
-                    if self.down_run_reds > self.settings["max_red_single_green"] else 1
+                    if self.down_run_reds >= self.settings["max_red_single_green"] else 1
                 if self.consec_green >= need:
                     self.pending_exit = True
                     brick["signal"] = "COVER"
@@ -313,6 +315,7 @@ class TradingEngine:
                     self.exit_retry_pending = True
                 self._set_alert("Order NOT placed — Angel One disconnected. Auto-reconnecting; "
                                 "will retry.", "error")
+                asyncio.create_task(self._save_order(order))
                 asyncio.create_task(self._persist_state())
                 return
 
@@ -340,6 +343,7 @@ class TradingEngine:
                     self.exit_retry_pending = True
                     self._set_alert(f"EXIT order failed — {order.get('note', 'unknown reason')}. "
                                     f"Position still OPEN — auto-retrying every tick.", "error")
+            asyncio.create_task(self._save_order(order))
         asyncio.create_task(self._persist_state())
 
     def _set_alert(self, msg, level="info"):
@@ -498,6 +502,21 @@ class TradingEngine:
 
     async def _save_trade(self, trade):
         await self.db.trades.insert_one({**trade})
+
+    async def _save_order(self, order):
+        """Persist a terminal order (COMPLETE/REJECTED) to the order_log for an
+        auditable history, especially the exact rejection reason."""
+        try:
+            doc = {k: v for k, v in order.items() if k != "_id"}
+            await self.db.order_log.insert_one(doc)
+            # keep the collection bounded
+            cnt = await self.db.order_log.estimated_document_count()
+            if cnt > 1000:
+                old = await self.db.order_log.find({}, {"_id": 1}).sort("time", 1).limit(cnt - 1000).to_list(cnt)
+                if old:
+                    await self.db.order_log.delete_many({"_id": {"$in": [o["_id"] for o in old]}})
+        except Exception as e:
+            logger.warning("order_log save failed: %s", e)
 
     def _update_unrealized(self):
         if self.position:
@@ -868,6 +887,7 @@ async def stop_bot(req: StopRequest = StopRequest()):
 async def reset_bot():
     engine.reset()
     await db.trades.delete_many({})
+    await db.order_log.delete_many({})
     await db.engine_state.delete_one({"_id": "singleton"})
     await engine.load_metrics()
     return {"ok": True}
@@ -912,6 +932,11 @@ async def arm_breaker():
 async def get_trades():
     trades = await db.trades.find({}, {"_id": 0}).sort("exit_time", -1).to_list(500)
     return trades
+
+
+@api_router.get("/orders/log")
+async def get_order_log():
+    return await db.order_log.find({}, {"_id": 0}).sort("time", -1).to_list(150)
 
 
 @api_router.post("/settings")
