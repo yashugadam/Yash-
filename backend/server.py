@@ -449,17 +449,41 @@ class TradingEngine:
         return {"ok": False, "message": "Unknown action."}
 
     async def _maybe_enter_on_start(self):
-        """On Start: if already in a 2+ red down-run and flat, enter SHORT immediately
-        at the current price instead of waiting for the next brick to print."""
+        """On Start (catching up to a move already in progress): mirror the EXIT rule to
+        decide if a down-move is still 'short-biased'. Look at the most recent red down-run
+        and the green pullback after it:
+          - down-run of 2-3 reds  -> short-biased unless 1 green has printed
+          - down-run of 4+ reds   -> short-biased unless 2 greens have printed
+        If still short-biased and we're flat, enter SHORT immediately. (Only on Start.)"""
         if not self.running or self.position or self.pending_entry or self.pending_exit:
             return
-        if self.consec_red >= 2 and not self._entries_blocked():
-            self.down_run_reds = self.consec_red
-            self.pending_entry = True
-            last_idx = self.bricks[-1]["index"] if self.bricks else -1
-            self._set_alert(f"Started in a {self.consec_red}-red down-run — entering SHORT "
-                            f"immediately at market.", "info")
-            await self._execute_order("SELL", "ENTRY", self.price, last_idx, "START_IMMEDIATE")
+        if self._entries_blocked():
+            return
+        # count trailing greens, then the red run immediately before them
+        trailing_greens, i = 0, len(self.bricks) - 1
+        while i >= 0 and self.bricks[i]["color"] == "green":
+            trailing_greens += 1
+            i -= 1
+        reds_before = 0
+        while i >= 0 and self.bricks[i]["color"] == "red":
+            reds_before += 1
+            i -= 1
+        if reds_before < 2:
+            return  # no valid short setup
+        required = self.settings["greens_to_exit_extended"] \
+            if reds_before >= self.settings["max_red_single_green"] else 1
+        if trailing_greens >= required:
+            return  # reversal already confirmed -> do not short
+        # down-bias still active -> enter SHORT, carrying the already-printed greens so the
+        # exit rule continues correctly (e.g. 5 reds + 1 green -> 1 more green will exit)
+        self.down_run_reds = reds_before
+        self.consec_red = 0 if trailing_greens > 0 else reds_before
+        self.consec_green = trailing_greens
+        self.pending_entry = True
+        last_idx = self.bricks[-1]["index"] if self.bricks else -1
+        self._set_alert(f"Started mid-downtrend ({reds_before} reds, {trailing_greens} green "
+                        f"pullback — reversal not confirmed) — entering SHORT at market.", "info")
+        await self._execute_order("SELL", "ENTRY", self.price, last_idx, "START_IMMEDIATE")
 
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":

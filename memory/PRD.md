@@ -63,5 +63,8 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 ## Implemented (2026-06-24) — LTP rounding
 - **Live LTP rounded to whole number** in `angel_broker.get_ltp` (e.g. 23890.30 → 23890). Cleaner brick levels and tick-aligned order prices.
 
+## Implemented (2026-06-24) — Smarter enter-on-Start (Option A)
+- **Enter-on-Start now mirrors the exit rule** (only on Start, not during live running). It scans the most recent red down-run + trailing green pullback: down-run of 2–3 reds is short-biased unless 1 green printed; 4+ reds short-biased unless 2 greens printed. If still short-biased and flat → enters SHORT immediately, carrying the already-printed greens so the exit rule continues correctly. Fixes "started late into a 5-red + 1-green downtrend → no trade". Verified across 10 scenarios via standalone test.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).
