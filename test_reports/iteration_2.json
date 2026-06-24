@@ -1,0 +1,43 @@
+{
+  "summary": "Feature-batch testing (trade-mode toggle, broker reconciliation, stop-with-square-off, paper-fill regression, top-level 'mode' in /api/state) on backend + frontend. Backend pytest suite (test_feature_batch.py) executed 12 tests: 11 PASSED, 1 SKIPPED (paper-fill regression — random walk did not produce a SHORT signal within 60s, which the spec allows). Frontend Playwright flow validated: header trade-mode-toggle shows 'Paper'; clicking opens live-confirm-dialog with Enable LIVE / Stay on Paper; cancelling closes it; clicking Enable LIVE while feed=SIM keeps the toggle on Paper (backend rejects with ok:false as designed, no error surfaced because dialog already closed via setShowLiveConfirm(false)); reconcile-widget present in right column and Check Angel One -> reconcile-good ('Everything is good'); stop confirmation dialog opens on clicking Stop, Keep running cancels it, confirm stops the bot (button reverts to Start, toast 'Bot stopped — no open position').",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/bot/trade-mode", "issue": "Body is a raw dict (FastAPI consumes as Body) — no Pydantic schema. Same for /api/bot/reconcile/resolve and /api/feed/mode. Works but no validation/typing on incoming JSON."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Enable LIVE click while feed=SIM", "issue": "setTradeMode('LIVE') closes the confirm dialog BEFORE awaiting the backend response, so the rejection toast (error 'Switch the price feed to LIVE before going LIVE') does fire, but state.mode silently stays PAPER and toggle text remains 'Paper'. Functionally correct (safety), but user might not notice the toast in fast clicks. Consider keeping dialog open until backend resolves, or showing inline error in the dialog.", "affected_selectors": ["live-confirm-button","trade-mode-toggle"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_feature_batch.py",
+    "/app/backend/tests/test_renko_bot.py",
+    "/app/test_reports/pytest/pytest_feature_batch.xml"
+  ],
+  "action_items": [
+    "(Optional) Add Pydantic models for /api/bot/trade-mode, /api/bot/reconcile/resolve, /api/feed/mode request bodies for better validation/OpenAPI docs.",
+    "(Optional) Keep live-confirm-dialog open until /api/bot/trade-mode resolves so the user clearly sees rejection reasons (e.g. feed must be LIVE).",
+    "(Optional) Surface 'mode' badge state more explicitly when a LIVE switch is rejected — currently the toggle simply remains 'Paper' which can be missed."
+  ],
+  "critical_code_review_comments": [
+    "server.py reconcile_resolve('reexit') hard-codes self.position = {... side:'SHORT', qty: |broker_qty| ...}: if the broker is actually NET LONG (positive qty), the bot would falsely synthesize a SHORT position and attempt to BUY to exit — wrong direction. Should branch on sign of netqty to set side and exit order side correctly. Currently low risk because bot only takes SHORT, but a manual broker long would be mis-flattened.",
+    "server.py /api/bot/trade-mode accepts `body: dict` instead of Pydantic; a malformed body without `mode` defaults to PAPER silently — better to 422 on missing field.",
+    "Dashboard.js setTradeMode closes the confirm dialog before awaiting axios — user can rapidly click again before backend responds. Add an async-pending state to disable Enable LIVE during the round trip.",
+    "Reconcile widget shows 'GOOD' immediately even if /api/bot/reconcile returned available:false on a prior call — recon state should clear when broker disconnects.",
+    "TradingEngine class still 700+ lines in server.py; reconcile + trade-mode would slot cleanly into an engine module with route handlers thin pass-throughs."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_feature_batch.py"
+  ],
+  "success_rate": {"backend": "100% (11/11 executed; 1 acceptable skip per spec)", "frontend": "100% (all 4 new feature flows verified)"},
+  "test_credentials": "No app auth. Angel One auto-connects from backend .env (broker.connected=true verified at test time).",
+  "seed_data_creation": "None. Tests reset/stop the bot before assertions; teardown restores feed=SIM, mode=PAPER, brick_size=50, bar_seconds=60.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "App left in safe state: feed_mode=SIM, mode=PAPER, brick_size=50, bar_seconds=60, bot stopped. Angel One is auto-connected on backend startup via env creds. To deterministically observe a SHORT entry, lower brick_size to 20 and bar_seconds to 2 via /api/settings, then POST /api/bot/start and poll /api/state.orders[] for up to ~90s (random-walk dependent — may need a couple of attempts). Reconcile state is GOOD when bot.position is null AND broker netqty==0; ENTRY_MISSED when bot has SHORT but broker flat; EXIT_MISSED when bot flat but broker has open qty. The /api/bot/reconcile/resolve reexit path currently hard-codes side=SHORT regardless of broker direction — flag if this needs testing with a real net-long broker position.",
+  "rca of the issue": "No bugs found in the new feature batch. Endpoints and UI behave per spec. Only forward-looking issue: reconcile reexit assumes SHORT direction; safe today but worth fixing before adding LONG-side strategy."
+}

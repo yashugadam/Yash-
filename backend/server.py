@@ -79,7 +79,7 @@ class TradingEngine:
         }
         # runtime
         self.running = False
-        self.mode = "DEMO"  # order mode: DEMO/paper only (no real orders placed)
+        self.mode = "PAPER"  # order mode: PAPER (simulated fills) or LIVE (real Angel One orders)
         self.feed_mode = "SIM"   # SIM (simulated) or LIVE (real Angel One LTP)
         self._saved_feed_mode = "SIM"
         self.feed_error = ""
@@ -286,7 +286,8 @@ class TradingEngine:
                 return
 
             base = self.settings["buffer_points"]
-            forced = reason in ("EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF") \
+            forced = reason in ("EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF",
+                                "RECONCILE_REEXIT") \
                 or (kind == "EXIT" and self.forced_exit_pending)
             cap = self.settings.get("forced_exit_slippage", 25) if forced \
                 else self.settings.get("max_slippage", 10)   # hard slippage cap (pts)
@@ -296,53 +297,40 @@ class TradingEngine:
             floor = ref_price - cap                            # SELL won't go below this
             ceil = ref_price + cap                             # BUY won't go above this
 
+            live = (self.mode == "LIVE" and self.feed_mode == "LIVE" and self.broker.connected)
             order = {
                 "id": str(uuid.uuid4()), "side": side, "kind": kind, "reason": reason,
                 "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
                 "order_type": "LIMIT", "ref_price": round(ref_price, 2),
                 "limit_price": None, "status": "PENDING", "attempts": 0,
                 "brick_index": brick_index, "time": now_iso(), "fill_price": None,
+                "mode": "LIVE" if live else "PAPER", "broker_order_id": None,
                 "note": "Limit order (SEBI compliant - no market order)",
             }
             self.orders.insert(0, order)
             self.orders = self.orders[:60]
 
-            filled = False
-            for attempt in range(1, max_attempts + 1):
-                buffer = min(base + (attempt - 1) * 5, cap)    # widen 5 -> ... -> cap
-                cur = await self._cur_price()
-                if side == "SELL":
-                    limit = max(round(cur - buffer, 2), round(floor, 2))
-                    can_fill = cur >= limit                    # sell fills if mkt >= limit
-                else:
-                    limit = min(round(cur + buffer, 2), round(ceil, 2))
-                    can_fill = cur <= limit                    # buy fills if mkt <= limit
-                order["attempts"] = attempt
-                order["limit_price"] = limit
-                order["status"] = "PENDING" if attempt == 1 else "RETRYING"
-                await asyncio.sleep(0.5)                        # broker round-trip / fill window
-                if can_fill:
-                    filled = True
-                    break
-                order["note"] = f"Unfilled (slippage > {cap}pt) - re-pricing, attempt {attempt}/{max_attempts}"
-                if attempt < max_attempts:
-                    await asyncio.sleep(retry_secs)
+            if live:
+                filled = await self._live_fill(order, side, base, cap, max_attempts, retry_secs, floor, ceil)
+            else:
+                filled = await self._paper_fill(order, side, base, cap, max_attempts, retry_secs, floor, ceil)
 
             if filled:
                 order["status"] = "COMPLETE"
-                order["fill_price"] = order["limit_price"]
+                if order.get("fill_price") is None:
+                    order["fill_price"] = order["limit_price"]
                 order["fill_time"] = now_iso()
-                order["note"] = f"Filled @ {order['limit_price']} (attempt {order['attempts']})"
                 self.exit_retry_pending = False
                 if kind == "EXIT":
                     self.forced_exit_pending = False
                 self._apply_fill(order)
             else:
                 order["status"] = "REJECTED"
-                order["note"] = f"NOT FILLED after {max_attempts} tries - price moved > {cap}pt from signal"
+                if not order.get("note", "").startswith(("LIVE", "Broker")):
+                    order["note"] = f"NOT FILLED after {max_attempts} tries - price moved > {cap}pt from signal"
                 if kind == "ENTRY":
                     self.pending_entry = False
-                    self._set_alert(f"Entry order skipped: price moved > {cap}pt beyond signal "
+                    self._set_alert(f"Entry order skipped: not filled within {cap}pt of signal "
                                     f"({ref_price}). No position opened.", "warning")
                 else:  # EXIT must keep trying - position is still open
                     self.pending_exit = False
@@ -354,6 +342,127 @@ class TradingEngine:
     def _set_alert(self, msg, level="info"):
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
         logger.warning("ALERT(%s): %s", level, msg)
+
+    async def _paper_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
+        """Simulated fill loop (paper trading)."""
+        for attempt in range(1, max_attempts + 1):
+            buffer = min(base + (attempt - 1) * 5, cap)        # widen 5 -> ... -> cap
+            cur = await self._cur_price()
+            if side == "SELL":
+                limit = max(round(cur - buffer, 2), round(floor, 2))
+                can_fill = cur >= limit                        # sell fills if mkt >= limit
+            else:
+                limit = min(round(cur + buffer, 2), round(ceil, 2))
+                can_fill = cur <= limit                        # buy fills if mkt <= limit
+            order["attempts"] = attempt
+            order["limit_price"] = limit
+            order["status"] = "PENDING" if attempt == 1 else "RETRYING"
+            await asyncio.sleep(0.5)
+            if can_fill:
+                order["note"] = f"Filled @ {limit} (attempt {attempt}) [PAPER]"
+                return True
+            order["note"] = f"Unfilled (slippage > {cap}pt) - re-pricing, attempt {attempt}/{max_attempts}"
+            if attempt < max_attempts:
+                await asyncio.sleep(retry_secs)
+        return False
+
+    async def _live_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
+        """Real Angel One LIMIT order with escalating buffer + re-pricing.
+        One broker order id is kept and modified across retries to avoid double fills;
+        if it gets rejected/cancelled we place a fresh one. Unfilled orders are cancelled."""
+        angel_side = "SELL" if side == "SELL" else "BUY"
+        qty = self.settings["lot_size"]
+        broker_id = None
+        for attempt in range(1, max_attempts + 1):
+            buffer = min(base + (attempt - 1) * 5, cap)
+            cur = await self._cur_price()
+            if side == "SELL":
+                limit = max(round(cur - buffer, 2), round(floor, 2))
+            else:
+                limit = min(round(cur + buffer, 2), round(ceil, 2))
+            order["attempts"] = attempt
+            order["limit_price"] = limit
+            order["status"] = "PENDING" if attempt == 1 else "RETRYING"
+            if broker_id is None:
+                res = await asyncio.to_thread(self.broker.place_limit_order, angel_side, limit, qty)
+                if not res.get("ok"):
+                    order["note"] = f"Broker reject: {res.get('error')}"
+                    if attempt < max_attempts:
+                        await asyncio.sleep(retry_secs)
+                    continue
+                broker_id = res.get("orderid")
+                order["broker_order_id"] = broker_id
+            else:
+                await asyncio.to_thread(self.broker.modify_order_price, broker_id, limit, qty, angel_side)
+            await asyncio.sleep(min(2.0, retry_secs))          # let the order work
+            st = await asyncio.to_thread(self.broker.get_order_status, broker_id)
+            s = (st.get("status") or "").lower()
+            if "complet" in s or "filled" in s or "executed" in s:
+                order["fill_price"] = st.get("avgprice") or limit
+                order["note"] = f"LIVE filled @ {order['fill_price']} (order {broker_id})"
+                return True
+            if "reject" in s or "cancel" in s:
+                order["note"] = f"Broker {s}: {st.get('text', '')}"
+                broker_id = None                               # place fresh next attempt
+            else:
+                order["note"] = f"LIVE working/unfilled - re-pricing, attempt {attempt}/{max_attempts}"
+            if attempt < max_attempts:
+                await asyncio.sleep(max(retry_secs - 2.0, 1.0))
+        if broker_id:   # cancel the dangling working order so it can't fill later unexpectedly
+            await asyncio.to_thread(self.broker.cancel_order, broker_id)
+            order["note"] = f"LIVE not filled in {max_attempts} tries - order {broker_id} cancelled"
+        return False
+
+    # -------- LIVE position reconciliation (on restart) --------
+    async def reconcile(self):
+        """Compare the bot's recorded position with Angel One's actual net position."""
+        if not (self.broker.connected and self.broker.fut_token):
+            return {"available": False, "reason": "Angel One not connected."}
+        np = await asyncio.to_thread(self.broker.get_net_position)
+        if not np.get("found"):
+            return {"available": False, "reason": np.get("error") or "Could not read positions."}
+        broker_qty = int(np.get("netqty", 0))
+        bot_short = bool(self.position)
+        if bot_short and broker_qty == 0:
+            state, msg = "ENTRY_MISSED", ("Bot shows an open SHORT but Angel One shows NO position - "
+                                          "the entry order never executed. You can re-enter the trade.")
+        elif (not bot_short) and broker_qty != 0:
+            state, msg = "EXIT_MISSED", ("Angel One still shows an OPEN position but the bot is flat - "
+                                         "the exit never executed. You can exit the trade again.")
+        else:
+            state, msg = "GOOD", "Bot and Angel One match - everything is in sync."
+        return {"available": True, "state": state, "message": msg, "mode": self.mode,
+                "bot_position": self.position, "broker_netqty": broker_qty,
+                "broker_avgprice": np.get("avgprice")}
+
+    async def reconcile_resolve(self, action):
+        if action == "reenter":
+            if not self.position:
+                return {"ok": False, "message": "No bot position to re-enter."}
+            reds = self.position.get("reds_at_entry", 2)
+            self.position = None
+            self.pending_entry = True
+            self.down_run_reds = reds
+            asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, -1, "RECONCILE_REENTRY"))
+            await self._persist_state()
+            return {"ok": True, "message": "Re-entry SHORT order placed."}
+        if action == "reexit":
+            np = await asyncio.to_thread(self.broker.get_net_position)
+            qty = abs(int(np.get("netqty", 0)))
+            if qty == 0:
+                return {"ok": False, "message": "Angel One shows no open position to exit."}
+            self.position = {
+                "side": "SHORT", "qty": qty, "entry_price": np.get("avgprice") or self.price,
+                "entry_time": now_iso(), "entry_order_id": "RECONCILE",
+                "reds_at_entry": self.down_run_reds, "unrealized_pnl": 0.0,
+            }
+            self.pending_exit = False
+            self._force_exit("RECONCILE_REEXIT")
+            await self._persist_state()
+            return {"ok": True, "message": "Exit order placed to flatten the broker position."}
+        if action == "accept":
+            return {"ok": True, "message": "Marked as reconciled."}
+        return {"ok": False, "message": "Unknown action."}
 
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":
@@ -504,7 +613,7 @@ class TradingEngine:
     def _state_doc(self):
         return {
             "_id": "singleton", "saved_at": now_iso(),
-            "running": self.running, "price": self.price,
+            "running": self.running, "price": self.price, "mode": self.mode,
             "settings": self.settings,
             "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
             "bricks": self.bricks[-800:],
@@ -539,6 +648,7 @@ class TradingEngine:
         self.day_key = doc.get("day_key")
         self.day_realized = doc.get("day_realized", 0.0)
         self.breaker_tripped = doc.get("breaker_tripped", False)
+        self.mode = doc.get("mode", "PAPER")
         self._saved_feed_mode = doc.get("feed_mode", "SIM")
         self.price = self.prev_price = doc.get("price", self.start_price)
         self.running = doc.get("running", False)
@@ -759,6 +869,34 @@ async def square_off():
         return {"ok": False, "message": "No open position to square off."}
     engine._force_exit("MANUAL_SQUAREOFF")
     return {"ok": True, "message": "Square-off order placed (demo)."}
+
+
+@api_router.post("/bot/trade-mode")
+async def set_trade_mode(body: dict):
+    mode = (body.get("mode") or "PAPER").upper()
+    if mode == "LIVE":
+        if not engine.broker.connected:
+            return {"ok": False, "mode": engine.mode, "error": "Connect Angel One before going LIVE."}
+        if engine.feed_mode != "LIVE":
+            return {"ok": False, "mode": engine.mode, "error": "Switch the price feed to LIVE before going LIVE."}
+        engine.mode = "LIVE"
+        engine._set_alert("LIVE TRADING ENABLED - real orders will be placed on Angel One.", "warning")
+    else:
+        engine.mode = "PAPER"
+        engine._set_alert("Switched to PAPER mode - orders are simulated (no real orders).", "info")
+    await engine._persist_state()
+    return {"ok": True, "mode": engine.mode}
+
+
+@api_router.get("/bot/reconcile")
+async def get_reconcile():
+    return await engine.reconcile()
+
+
+@api_router.post("/bot/reconcile/resolve")
+async def post_reconcile_resolve(body: dict):
+    action = (body.get("action") or "").lower()
+    return await engine.reconcile_resolve(action)
 
 
 @api_router.post("/bot/arm")

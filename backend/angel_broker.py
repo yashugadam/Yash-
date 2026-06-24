@@ -204,6 +204,117 @@ class AngelBroker:
             logger.warning("get_history failed: %s", e)
         return None
 
+    # -------- real order placement / positions (LIVE trading) --------
+    def place_limit_order(self, transactiontype, price, quantity):
+        """Place a LIMIT, CARRYFORWARD (NRML) order on the selected future.
+        transactiontype = 'BUY' | 'SELL'. Returns {ok, orderid, error}."""
+        if not self.connected or not self.fut_token:
+            return {"ok": False, "error": "broker not connected"}
+        params = {
+            "variety": "NORMAL",
+            "tradingsymbol": self.fut_symbol,
+            "symboltoken": str(self.fut_token),
+            "transactiontype": transactiontype,
+            "exchange": "NFO",
+            "ordertype": "LIMIT",
+            "producttype": "CARRYFORWARD",   # overnight carry-forward (NRML)
+            "duration": "DAY",
+            "price": str(round(float(price), 2)),
+            "quantity": str(int(quantity)),
+            "squareoff": "0",
+            "stoploss": "0",
+        }
+        for attempt in range(2):
+            try:
+                resp = self.smart.placeOrderFullResponse(params)
+                if resp.get("status"):
+                    d = resp.get("data") or {}
+                    oid = d.get("orderid") or d.get("orderId")
+                    logger.info("LIVE order placed: %s %s @ %s qty=%s id=%s",
+                                transactiontype, self.fut_symbol, price, quantity, oid)
+                    return {"ok": True, "orderid": oid,
+                            "uniqueorderid": d.get("uniqueorderid")}
+                self.error = str(resp.get("message") or resp)
+            except Exception as e:
+                self.error = str(e)
+                logger.warning("placeOrder failed (attempt %d): %s", attempt + 1, e)
+            if attempt == 0 and not self.relogin():
+                break
+        return {"ok": False, "error": self.error}
+
+    def modify_order_price(self, orderid, price, quantity, transactiontype):
+        """Re-price a working LIMIT order (used to escalate the buffer on retries)."""
+        params = {
+            "variety": "NORMAL",
+            "orderid": str(orderid),
+            "tradingsymbol": self.fut_symbol,
+            "symboltoken": str(self.fut_token),
+            "transactiontype": transactiontype,
+            "exchange": "NFO",
+            "ordertype": "LIMIT",
+            "producttype": "CARRYFORWARD",
+            "duration": "DAY",
+            "price": str(round(float(price), 2)),
+            "quantity": str(int(quantity)),
+        }
+        try:
+            resp = self.smart.modifyOrder(params)
+            return {"ok": bool(resp.get("status")), "error": str(resp.get("message") or "")}
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("modifyOrder failed: %s", e)
+            return {"ok": False, "error": self.error}
+
+    def get_order_status(self, orderid):
+        """Look up an order in the order book. Returns
+        {found, status, avgprice, filledqty, text}."""
+        try:
+            ob = self.smart.orderBook()
+            if ob.get("status"):
+                for o in ob.get("data") or []:
+                    if str(o.get("orderid")) == str(orderid):
+                        return {
+                            "found": True,
+                            "status": o.get("orderstatus") or o.get("status") or "",
+                            "avgprice": float(o.get("averageprice") or 0) or None,
+                            "filledqty": int(float(o.get("filledshares") or 0)),
+                            "text": o.get("text", ""),
+                        }
+            else:
+                self.error = str(ob.get("message") or ob)
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("orderBook failed: %s", e)
+        return {"found": False}
+
+    def cancel_order(self, orderid):
+        try:
+            resp = self.smart.cancelOrder(str(orderid), "NORMAL")
+            return {"ok": bool(resp.get("status")), "error": str(resp.get("message") or "")}
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("cancelOrder failed: %s", e)
+            return {"ok": False, "error": self.error}
+
+    def get_net_position(self):
+        """Net quantity for the selected future token. Negative = short, positive = long.
+        Returns {found, netqty, avgprice}. found=True with netqty=0 means flat."""
+        try:
+            res = self.smart.position()
+            if res.get("status"):
+                for p in res.get("data") or []:
+                    tok = str(p.get("symboltoken") or p.get("scripttoken") or "")
+                    if tok == str(self.fut_token):
+                        return {"found": True, "netqty": int(float(p.get("netqty") or 0)),
+                                "avgprice": float(p.get("avgnetprice") or p.get("netprice")
+                                                  or p.get("openprice") or 0) or None}
+                return {"found": True, "netqty": 0, "avgprice": None}  # flat for this token
+            self.error = str(res.get("message") or res)
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("position() failed: %s", e)
+        return {"found": False, "error": self.error}
+
     def logout(self):
         try:
             if self.smart and self.client_code:
