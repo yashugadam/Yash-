@@ -66,5 +66,10 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 ## Implemented (2026-06-24) — Smarter enter-on-Start (Option A)
 - **Enter-on-Start now mirrors the exit rule** (only on Start, not during live running). It scans the most recent red down-run + trailing green pullback: down-run of 2–3 reds is short-biased unless 1 green printed; 4+ reds short-biased unless 2 greens printed. If still short-biased and flat → enters SHORT immediately, carrying the already-printed greens so the exit rule continues correctly. Fixes "started late into a 5-red + 1-green downtrend → no trade". Verified across 10 scenarios via standalone test.
 
+## Implemented (2026-06-24) — Manual test orders + IP-rejection diagnosis
+- **ROOT CAUSE of all order rejections found**: Angel One SEBI rule — order placement (Place/Modify/Cancel) only works from a **registered static IP**. Login & market data work without it. Preview egress = 104.198.214.223 (not whitelisted); production egress = 4.188.96.104 (user registered it on smartapi.angelone.in). Orders will succeed from PRODUCTION only. Not a code bug — cannot be changed in app code (Angel validates real socket IP).
+- **Manual Order panel** added (`POST /api/orders/manual` {side} + UI Buy/Sell 1-lot buttons) to place a one-off REAL LIMIT order near LTP for verification, independent of the strategy. Result + exact reason logged to Order Log.
+- Test BUY from preview correctly rejected with the IP error (pipeline verified end-to-end).
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).
