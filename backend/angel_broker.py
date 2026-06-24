@@ -7,6 +7,7 @@ and must be invoked from the engine via asyncio.to_thread.
 """
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, date
 
 import pyotp
@@ -60,7 +61,7 @@ class AngelBroker:
         self.error = ""
         self.api_key, self.client_code, self._pin, self._totp = api_key, client_code, pin, totp_secret
         try:
-            self.smart = SmartConnect(api_key=api_key, proxies=_angel_proxies())
+            self.smart = SmartConnect(api_key=api_key)
             otp = pyotp.TOTP(totp_secret).now()
             data = self.smart.generateSession(client_code, pin, otp)
             if not data.get("status"):
@@ -224,6 +225,19 @@ class AngelBroker:
         return None
 
     # -------- real order placement / positions (LIVE trading) --------
+    @contextmanager
+    def _order_proxy(self):
+        """Route ONLY order place/modify/cancel through the static-IP proxy (if set).
+        Login & market data stay direct, so the connection never depends on the proxy."""
+        prx = _angel_proxies()
+        if prx and self.smart is not None:
+            self.smart.proxies = prx
+        try:
+            yield
+        finally:
+            if self.smart is not None:
+                self.smart.proxies = {}
+
     def place_limit_order(self, transactiontype, price, quantity):
         """Place a LIMIT, CARRYFORWARD (NRML) order on the selected future.
         transactiontype = 'BUY' | 'SELL'. Returns {ok, orderid, error}."""
@@ -245,7 +259,8 @@ class AngelBroker:
         }
         for attempt in range(2):
             try:
-                resp = self.smart.placeOrderFullResponse(params)
+                with self._order_proxy():
+                    resp = self.smart.placeOrderFullResponse(params)
                 if resp.get("status"):
                     d = resp.get("data") or {}
                     oid = d.get("orderid") or d.get("orderId")
@@ -277,7 +292,8 @@ class AngelBroker:
             "quantity": str(int(quantity)),
         }
         try:
-            resp = self.smart.modifyOrder(params)
+            with self._order_proxy():
+                resp = self.smart.modifyOrder(params)
             return {"ok": bool(resp.get("status")), "error": str(resp.get("message") or "")}
         except Exception as e:
             self.error = str(e)
@@ -308,7 +324,8 @@ class AngelBroker:
 
     def cancel_order(self, orderid):
         try:
-            resp = self.smart.cancelOrder(str(orderid), "NORMAL")
+            with self._order_proxy():
+                resp = self.smart.cancelOrder(str(orderid), "NORMAL")
             return {"ok": bool(resp.get("status")), "error": str(resp.get("message") or "")}
         except Exception as e:
             self.error = str(e)

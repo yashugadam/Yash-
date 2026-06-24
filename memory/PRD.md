@@ -71,5 +71,10 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 - **Manual Order panel** added (`POST /api/orders/manual` {side} + UI Buy/Sell 1-lot buttons) to place a one-off REAL LIMIT order near LTP for verification, independent of the strategy. Result + exact reason logged to Order Log.
 - Test BUY from preview correctly rejected with the IP error (pipeline verified end-to-end).
 
+## Implemented (2026-06-24) — Static-IP proxy for orders (Azure)
+- **Order placement can route through a static-IP proxy** via `ANGEL_PROXY_URL` (set to `http://4.188.96.104:8888` — user's Azure VM). Solves Angel One's SEBI static-IP rule when hosted on Emergent's shared egress (34.9.233.22, which is already taken by another app on Angel).
+- **Critical design**: proxy is applied ONLY to order place/modify/cancel (via `_order_proxy()` contextmanager in angel_broker.py). Login + LTP + history + orderBook + position stay DIRECT, so the broker connection/live-data never depend on the proxy being up. (Earlier a global proxy on SmartConnect broke the whole connection — fixed.)
+- User must: run tinyproxy on Azure VM port 8888 (Allow 34.9.233.22), fix NSG (source port `*`, dest port 8888), confirm VM outbound IP = 4.188.96.104 (whitelisted on app RHR6a8ea), then redeploy.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).
