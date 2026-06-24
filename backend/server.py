@@ -4,7 +4,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import asyncio
-import random
+import time
 import calendar
 import logging
 from pathlib import Path
@@ -63,8 +63,8 @@ class TradingEngine:
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
-            "buffer_points": 5,            # SEBI-safe limit buffer (no market orders)
-            "max_slippage": 10,            # hard cap: never fill more than this far from signal (pts)
+            "buffer_points": 20,           # SEBI-safe limit buffer (no market orders)
+            "max_slippage": 20,            # hard cap: never fill more than this far from signal (pts)
             "forced_exit_slippage": 25,    # wider cap for forced exits (expiry/breaker/manual square-off)
             "retry_seconds": 5,            # wait between re-pricing attempts
             "max_order_attempts": 5,       # max placement attempts before alerting
@@ -79,9 +79,9 @@ class TradingEngine:
         }
         # runtime
         self.running = False
-        self.mode = "PAPER"  # order mode: PAPER (simulated fills) or LIVE (real Angel One orders)
-        self.feed_mode = "SIM"   # SIM (simulated) or LIVE (real Angel One LTP)
-        self._saved_feed_mode = "SIM"
+        self.mode = "LIVE"  # LIVE-only: always places REAL orders on Angel One (no paper/demo)
+        self.feed_mode = "LIVE"   # LIVE-only: always real Angel One LTP (no simulation)
+        self._saved_feed_mode = "LIVE"
         self.feed_error = ""
         self.broker = AngelBroker()
         self.angel = {"connected": False, "client_id": "", "api_key": ""}
@@ -120,14 +120,7 @@ class TradingEngine:
         self.day_key: Optional[str] = None            # IST date the day P&L belongs to
         self.day_realized = 0.0                       # realized P&L booked today
         self.breaker_tripped = False
-
-    # -------- price simulation --------
-    def _gen_price(self):
-        self.prev_price = self.price
-        self.momentum = self.momentum * 0.85 + random.gauss(0, 1) * 6.0
-        # gentle mean reversion to keep price in a realistic band
-        self.momentum -= (self.price - self.start_price) * 0.0006
-        self.price += self.momentum + random.gauss(0, 2.5)
+        self._last_reconnect = 0.0                     # throttle for auto-reconnect
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -297,23 +290,33 @@ class TradingEngine:
             floor = ref_price - cap                            # SELL won't go below this
             ceil = ref_price + cap                             # BUY won't go above this
 
-            live = (self.mode == "LIVE" and self.feed_mode == "LIVE" and self.broker.connected)
             order = {
                 "id": str(uuid.uuid4()), "side": side, "kind": kind, "reason": reason,
                 "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
                 "order_type": "LIMIT", "ref_price": round(ref_price, 2),
                 "limit_price": None, "status": "PENDING", "attempts": 0,
                 "brick_index": brick_index, "time": now_iso(), "fill_price": None,
-                "mode": "LIVE" if live else "PAPER", "broker_order_id": None,
+                "mode": "LIVE", "broker_order_id": None,
                 "note": "Limit order (SEBI compliant - no market order)",
             }
             self.orders.insert(0, order)
             self.orders = self.orders[:60]
 
-            if live:
-                filled = await self._live_fill(order, side, base, cap, max_attempts, retry_secs, floor, ceil)
-            else:
-                filled = await self._paper_fill(order, side, base, cap, max_attempts, retry_secs, floor, ceil)
+            # LIVE-only: a real broker connection is required to place any order.
+            if not self.broker.connected:
+                order["status"] = "REJECTED"
+                order["note"] = "Angel One not connected — cannot place LIVE order."
+                if kind == "ENTRY":
+                    self.pending_entry = False
+                else:
+                    self.pending_exit = False
+                    self.exit_retry_pending = True
+                self._set_alert("Order NOT placed — Angel One disconnected. Auto-reconnecting; "
+                                "will retry.", "error")
+                asyncio.create_task(self._persist_state())
+                return
+
+            filled = await self._live_fill(order, side, base, cap, max_attempts, retry_secs, floor, ceil)
 
             if filled:
                 order["status"] = "COMPLETE"
@@ -342,29 +345,6 @@ class TradingEngine:
     def _set_alert(self, msg, level="info"):
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
         logger.warning("ALERT(%s): %s", level, msg)
-
-    async def _paper_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
-        """Simulated fill loop (paper trading)."""
-        for attempt in range(1, max_attempts + 1):
-            buffer = min(base + (attempt - 1) * 5, cap)        # widen 5 -> ... -> cap
-            cur = await self._cur_price()
-            if side == "SELL":
-                limit = max(round(cur - buffer, 2), round(floor, 2))
-                can_fill = cur >= limit                        # sell fills if mkt >= limit
-            else:
-                limit = min(round(cur + buffer, 2), round(ceil, 2))
-                can_fill = cur <= limit                        # buy fills if mkt <= limit
-            order["attempts"] = attempt
-            order["limit_price"] = limit
-            order["status"] = "PENDING" if attempt == 1 else "RETRYING"
-            await asyncio.sleep(0.5)
-            if can_fill:
-                order["note"] = f"Filled @ {limit} (attempt {attempt}) [PAPER]"
-                return True
-            order["note"] = f"Unfilled (slippage > {cap}pt) - re-pricing, attempt {attempt}/{max_attempts}"
-            if attempt < max_attempts:
-                await asyncio.sleep(retry_secs)
-        return False
 
     async def _live_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
         """Real Angel One LIMIT order with escalating buffer + re-pricing.
@@ -661,8 +641,9 @@ class TradingEngine:
         self.day_key = doc.get("day_key")
         self.day_realized = doc.get("day_realized", 0.0)
         self.breaker_tripped = doc.get("breaker_tripped", False)
-        self.mode = doc.get("mode", "PAPER")
-        self._saved_feed_mode = doc.get("feed_mode", "SIM")
+        self.mode = "LIVE"          # LIVE-only app: always real-money mode
+        self._saved_feed_mode = "LIVE"
+        self.feed_mode = "LIVE"
         self.price = self.prev_price = doc.get("price", self.start_price)
         self.running = doc.get("running", False)
         # In-flight orders cannot be trusted across a crash -> clear flags.
@@ -674,20 +655,34 @@ class TradingEngine:
 
     # -------- price source (live Angel LTP or simulated) --------
     async def _next_price(self):
-        if self.feed_mode == "LIVE":
-            if not self.broker.connected:
-                self.feed_error = "Angel not connected (LIVE feed paused)"
-                return  # never inject simulated data into a LIVE chart
-            ltp = await asyncio.to_thread(self.broker.get_ltp)
-            if ltp is not None:
-                self.prev_price = self.price
-                self.price = ltp
-                self.feed_error = ""
-            else:
-                self.feed_error = self.broker.error or "No LTP (market closed?)"
-                return  # hold last price; Renko just won't update
+        # LIVE-only: always use real Angel One LTP. If the session has dropped,
+        # auto-reconnect (throttled) instead of ever simulating a price.
+        if not self.broker.connected:
+            self.feed_error = "Angel One disconnected — auto-reconnecting…"
+            await self._auto_reconnect()
+            return
+        ltp = await asyncio.to_thread(self.broker.get_ltp)
+        if ltp is not None:
+            self.prev_price = self.price
+            self.price = ltp
+            self.feed_error = ""
         else:
-            self._gen_price()
+            self.feed_error = self.broker.error or "No LTP (market closed?)"
+
+    async def _auto_reconnect(self):
+        """Re-login to Angel One when the session drops (throttled ~every 20s)."""
+        now = time.time()
+        if now - self._last_reconnect < 20:
+            return
+        self._last_reconnect = now
+        ok = await asyncio.to_thread(self.broker.relogin)
+        if ok:
+            saved = self.settings.get("instrument_token")
+            if saved:
+                self.broker.select_instrument(saved)
+            self.feed_error = ""
+            self._set_alert("Angel One session reconnected automatically.", "info")
+            logger.info("Auto-reconnected Angel One (session had dropped)")
 
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
@@ -888,19 +883,9 @@ async def square_off():
 
 @api_router.post("/bot/trade-mode")
 async def set_trade_mode(body: dict):
-    mode = (body.get("mode") or "PAPER").upper()
-    if mode == "LIVE":
-        if not engine.broker.connected:
-            return {"ok": False, "mode": engine.mode, "error": "Connect Angel One before going LIVE."}
-        if engine.feed_mode != "LIVE":
-            return {"ok": False, "mode": engine.mode, "error": "Switch the price feed to LIVE before going LIVE."}
-        engine.mode = "LIVE"
-        engine._set_alert("LIVE TRADING ENABLED - real orders will be placed on Angel One.", "warning")
-    else:
-        engine.mode = "PAPER"
-        engine._set_alert("Switched to PAPER mode - orders are simulated (no real orders).", "info")
-    await engine._persist_state()
-    return {"ok": True, "mode": engine.mode}
+    # LIVE-only app: mode is always LIVE (real money). Kept for backward compatibility.
+    engine.mode = "LIVE"
+    return {"ok": True, "mode": "LIVE"}
 
 
 @api_router.get("/bot/reconcile")
@@ -933,6 +918,7 @@ async def get_trades():
 async def update_settings(body: SettingsUpdate):
     data = body.model_dump(exclude_none=True)
     engine.settings.update(data)
+    await engine._persist_state()   # persist so settings survive restarts
     return engine.settings
 
 
@@ -964,9 +950,8 @@ async def angel_connect():
 @api_router.post("/angel/disconnect")
 async def angel_disconnect():
     await asyncio.to_thread(engine.broker.logout)
-    engine.feed_mode = "SIM"
     await engine._persist_state()
-    return {"connected": False, "feed_mode": "SIM"}
+    return {"connected": False, "feed_mode": "LIVE"}
 
 
 @api_router.post("/angel/load-history")
@@ -1003,12 +988,9 @@ async def angel_select_instrument(body: dict):
 
 @api_router.post("/feed/mode")
 async def set_feed_mode(body: dict):
-    mode = (body.get("feed_mode") or "SIM").upper()
-    if mode == "LIVE" and not engine.broker.connected:
-        return {"ok": False, "feed_mode": engine.feed_mode, "error": "Connect Angel One first."}
-    engine.feed_mode = "LIVE" if mode == "LIVE" else "SIM"
-    await engine._persist_state()
-    return {"ok": True, "feed_mode": engine.feed_mode}
+    # LIVE-only app: feed is always real Angel One data. Kept for backward compatibility.
+    engine.feed_mode = "LIVE"
+    return {"ok": True, "feed_mode": "LIVE"}
 
 
 app.include_router(api_router)
@@ -1044,9 +1026,8 @@ async def _auto_connect_angel():
         saved = engine.settings.get("instrument_token")
         if saved:
             engine.broker.select_instrument(saved)   # restore user's chosen contract
-        if engine._saved_feed_mode == "LIVE":
-            engine.feed_mode = "LIVE"
-            logger.info("Auto-reconnected Angel One; LIVE feed resumed")
+        engine.feed_mode = "LIVE"
+        logger.info("Angel One connected on boot; LIVE feed active")
 
 
 @app.on_event("shutdown")

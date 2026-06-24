@@ -48,5 +48,12 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 ## Implemented (2026-06-24) — Immediate entry on Start
 - **Enter-on-Start**: clicking Start now checks the current brick run; if flat and already in a **2+ red down-run** (and entries not blocked), it places a SHORT **immediately at market** (`reason=START_IMMEDIATE`) instead of waiting for the next brick to print. Works in PAPER (simulated) and LIVE (real order). Implemented as `_maybe_enter_on_start()` fired from `/api/bot/start`. Verified via curl: starting at consec_red=3 opened a SHORT instantly.
 
+## Implemented (2026-06-24) — LIVE-ONLY (real money) conversion
+- **Removed SIM feed + PAPER orders entirely.** App is now LIVE-only: always real Angel One LTP, always REAL CARRYFORWARD LIMIT orders. `mode` and `feed_mode` are forced to "LIVE" everywhere (init, load_state, endpoints). Deleted `_gen_price` and `_paper_fill`. `_execute_order` now always uses `_live_fill` and rejects (with alert) if the broker is disconnected. `/bot/trade-mode` and `/feed/mode` neutralized to always return LIVE.
+- **Auto-reconnect watchdog**: `_auto_reconnect()` (throttled ~20s) re-logs into Angel One automatically when the session drops while running; `_next_price` calls it instead of ever simulating.
+- **Limit-order buffer/cap raised 5→20 pts** (`buffer_points=20`, `max_slippage=20`; forced-exit cap stays 25). Settings endpoint now persists to Mongo so changes survive restarts.
+- **Frontend**: removed PAPER/LIVE toggle, SIM/LIVE feed toggle, and the LIVE-enable dialog. Header now shows static "LIVE · REAL MONEY" + "LIVE DATA/Disconnected" badges. Added a **Start confirmation dialog** (warns real money + immediate entry). Kept all safety controls (Stop-confirm + force square-off, ₹10k breaker, expiry square-off, reconciliation).
+- **Testing note**: verified via screenshots + curl (UI renders, toggles gone, Start dialog works, backend LIVE + connected + buffer=20). Real order PLACEMENT was NOT executed in testing (real money + market open) — must be validated by user with a supervised 1-lot live trade.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).

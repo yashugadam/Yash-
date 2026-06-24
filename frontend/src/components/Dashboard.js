@@ -42,7 +42,7 @@ export default function Dashboard() {
   const [instResults, setInstResults] = useState([]);
   const [showInstSearch, setShowInstSearch] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [showLiveConfirm, setShowLiveConfirm] = useState(false);
+  const [showStartConfirm, setShowStartConfirm] = useState(false);
   const [recon, setRecon] = useState(null);
   const [reconBusy, setReconBusy] = useState(false);
 
@@ -92,10 +92,15 @@ export default function Dashboard() {
     return () => { clearInterval(a); clearInterval(b); };
   }, [poll, loadTrades]);
 
-  const startStop = async () => {
+  const startStop = () => {
     if (state?.running) { setShowStopConfirm(true); return; }
+    setShowStartConfirm(true);
+  };
+
+  const confirmStart = async () => {
+    setShowStartConfirm(false);
     await axios.post(`${API}/bot/start`);
-    toast.success("Bot started — feeding live ticks");
+    toast.warning("Bot started — LIVE real-money trading is ACTIVE");
     poll();
   };
 
@@ -106,20 +111,6 @@ export default function Dashboard() {
     if (data.squared_off) toast.info("Position squared off (forced exit) — bot stopped");
     else toast.info(hadPosition ? "Bot stopped" : "Bot stopped — no open position");
     poll(); loadTrades();
-  };
-
-  const toggleTradeMode = () => {
-    if (state?.mode === "LIVE") { setTradeMode("PAPER"); return; }
-    setShowLiveConfirm(true);
-  };
-
-  const setTradeMode = async (mode) => {
-    setShowLiveConfirm(false);
-    const { data } = await axios.post(`${API}/bot/trade-mode`, { mode });
-    if (!data.ok) { toast.error(data.error || "Could not switch mode"); return; }
-    if (data.mode === "LIVE") toast.warning("LIVE TRADING ON — real orders will be placed on Angel One");
-    else toast.info("Switched to PAPER mode — orders are simulated");
-    poll();
   };
 
   const checkReconcile = useCallback(async () => {
@@ -167,14 +158,7 @@ export default function Dashboard() {
 
   const disconnectAngel = async () => {
     await axios.post(`${API}/angel/disconnect`);
-    toast.info("Disconnected — back to simulated feed");
-    poll();
-  };
-
-  const setFeedMode = async (mode) => {
-    const { data } = await axios.post(`${API}/feed/mode`, { feed_mode: mode });
-    if (data.ok) toast.success(`Feed: ${mode === "LIVE" ? "Live Angel One data" : "Simulated"}`);
-    else toast.error(data.error || "Could not switch feed");
+    toast.info("Disconnected from Angel One");
     poll();
   };
 
@@ -230,14 +214,12 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
-          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.feed_mode === "LIVE" ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-slate-100 text-slate-600 border-slate-200"}`} data-testid="feed-badge" title={state.feed_error || ""}>
-            <Activity className="h-3 w-3" /> {state.feed_mode === "LIVE" ? "Live Data" : "Sim Data"}
+          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.angel?.connected ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-red-100 text-red-700 border-red-200"}`} data-testid="feed-badge" title={state.feed_error || ""}>
+            <Activity className="h-3 w-3" /> {state.angel?.connected ? "Live Data" : "Disconnected"}
           </span>
-          <button onClick={toggleTradeMode} data-testid="trade-mode-toggle"
-            title={state.mode === "LIVE" ? "LIVE — placing real orders. Click for PAPER." : "PAPER — simulated orders. Click for LIVE."}
-            className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border transition-colors ${state.mode === "LIVE" ? "bg-red-600 text-white border-red-700 hover:bg-red-700" : "bg-amber-100 text-amber-800 border-amber-200 hover:bg-amber-200"}`}>
-            {state.mode === "LIVE" ? <Zap className="h-3 w-3" /> : <ShieldCheck className="h-3 w-3" />} {state.mode === "LIVE" ? "Live" : "Paper"}
-          </button>
+          <span className="bg-red-600 text-white border border-red-700 px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1" data-testid="mode-badge" title="This bot trades LIVE with real money on Angel One">
+            <Zap className="h-3 w-3" /> Live · Real Money
+          </span>
           <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.running ? "bg-emerald-100 text-emerald-800 border-emerald-200" : "bg-slate-100 text-slate-500 border-slate-200"}`} data-testid="status-badge">
             <span className={`h-1.5 w-1.5 rounded-full ${state.running ? "bg-emerald-500 pulse-dot" : "bg-slate-400"}`} /> {state.running ? "Live" : "Idle"}
           </span>
@@ -281,29 +263,27 @@ export default function Dashboard() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={showLiveConfirm} onOpenChange={setShowLiveConfirm}>
-        <AlertDialogContent data-testid="live-confirm-dialog">
+      <AlertDialog open={showStartConfirm} onOpenChange={setShowStartConfirm}>
+        <AlertDialogContent data-testid="start-confirm-dialog">
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
-              <Zap className="h-5 w-5 text-red-600" /> Switch to LIVE trading?
+              <Zap className="h-5 w-5 text-red-600" /> Start LIVE trading?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              The bot will place <b>REAL orders on your Angel One account using real money</b>.
-              Orders are CARRYFORWARD (NRML) LIMIT orders on {state.angel?.future || "the selected future"}.
-              You can switch back to PAPER anytime.
-              {(!state.angel?.connected || state.feed_mode !== "LIVE") && (
-                <span className="block mt-2 text-red-600 font-semibold" data-testid="live-not-ready-note">
-                  ⚠ Not ready for LIVE: {!state.angel?.connected ? "connect Angel One" : "switch the price feed to LIVE"} first.
+              This bot trades <b>REAL money</b> on your Angel One account ({state.angel?.future || "selected future"}, qty {state.settings?.lot_size}).
+              Once started, it will place real CARRYFORWARD LIMIT orders automatically — and if the market is already in a 2+ red down-run, it will <b>enter a SHORT immediately</b>.
+              {!state.angel?.connected && (
+                <span className="block mt-2 text-red-600 font-semibold" data-testid="start-not-ready-note">
+                  ⚠ Angel One is disconnected — connect it first or no orders can be placed.
                 </span>
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel data-testid="live-cancel-button">Stay on Paper</AlertDialogCancel>
-            <AlertDialogAction onClick={() => setTradeMode("LIVE")} data-testid="live-confirm-button"
-              disabled={!state.angel?.connected || state.feed_mode !== "LIVE"}
-              className="bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:pointer-events-none">
-              Enable LIVE
+            <AlertDialogCancel data-testid="start-cancel-button">Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmStart} data-testid="start-confirm-button"
+              className="bg-red-600 hover:bg-red-700">
+              Start Live Trading
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -316,12 +296,6 @@ export default function Dashboard() {
             icon={<Activity className="h-3.5 w-3.5 text-slate-500" />}
             right={
               <div className="flex items-center gap-3 font-mono text-[11px]">
-                <div className="flex items-center border border-slate-200" data-testid="feed-toggle">
-                  <button onClick={() => setFeedMode("SIM")} data-testid="feed-sim-btn"
-                    className={`px-2 py-0.5 uppercase transition-colors ${state.feed_mode === "SIM" ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50"}`}>Sim</button>
-                  <button onClick={() => setFeedMode("LIVE")} data-testid="feed-live-btn"
-                    className={`px-2 py-0.5 uppercase transition-colors ${state.feed_mode === "LIVE" ? "bg-blue-600 text-white" : "text-slate-500 hover:bg-slate-50"}`}>Live</button>
-                </div>
                 <button onClick={loadHistory} data-testid="load-history-btn"
                   className="flex items-center gap-1 px-2 py-0.5 border border-slate-200 uppercase text-slate-500 hover:bg-slate-50 transition-colors disabled:opacity-40"
                   disabled={!state.angel.connected} title={state.angel.connected ? "Load real 5-day history" : "Connect Angel One first"}>
