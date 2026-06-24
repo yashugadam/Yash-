@@ -45,5 +45,8 @@ Build an algo trading bot for NIFTY Futures that places orders using a Renko-cha
 - **Broker reconciliation on restart** (`/api/bot/reconcile`, `/api/bot/reconcile/resolve`): compares bot position vs Angel One net qty → 3 states: GOOD ("everything is good"), ENTRY_MISSED ("short trade missed" → "take trade again"/reenter), EXIT_MISSED ("exit missed" → "exit trade again"/reexit). UI "Broker Reconciliation" widget with Check Angel One button + action buttons.
 - **Tested** (iteration_2.json): 11/12 backend passed (1 skipped — random-walk signal timing), all frontend flows passed. SAFETY: real-money LIVE+LIVE order fill path is implemented but NOT validated against a real exchange fill (would place real orders; market closed). Email alerts for missed fills: SKIPPED per user.
 
+## Implemented (2026-06-24) — Immediate entry on Start
+- **Enter-on-Start**: clicking Start now checks the current brick run; if flat and already in a **2+ red down-run** (and entries not blocked), it places a SHORT **immediately at market** (`reason=START_IMMEDIATE`) instead of waiting for the next brick to print. Works in PAPER (simulated) and LIVE (real order). Implemented as `_maybe_enter_on_start()` fired from `/api/bot/start`. Verified via curl: starting at consec_red=3 opened a SHORT instantly.
+
 ## Next Tasks
 - Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).

@@ -464,6 +464,19 @@ class TradingEngine:
             return {"ok": True, "message": "Marked as reconciled."}
         return {"ok": False, "message": "Unknown action."}
 
+    async def _maybe_enter_on_start(self):
+        """On Start: if already in a 2+ red down-run and flat, enter SHORT immediately
+        at the current price instead of waiting for the next brick to print."""
+        if not self.running or self.position or self.pending_entry or self.pending_exit:
+            return
+        if self.consec_red >= 2 and not self._entries_blocked():
+            self.down_run_reds = self.consec_red
+            self.pending_entry = True
+            last_idx = self.bricks[-1]["index"] if self.bricks else -1
+            self._set_alert(f"Started in a {self.consec_red}-red down-run — entering SHORT "
+                            f"immediately at market.", "info")
+            await self._execute_order("SELL", "ENTRY", self.price, last_idx, "START_IMMEDIATE")
+
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":
             self.position = {
@@ -836,6 +849,8 @@ async def get_state():
 async def start_bot():
     engine.running = True
     await engine._persist_state()
+    # enter immediately if we're starting into an existing 2+ red down-run
+    asyncio.create_task(engine._maybe_enter_on_start())
     return {"running": True}
 
 
