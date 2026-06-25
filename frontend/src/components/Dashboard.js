@@ -362,7 +362,7 @@ export default function Dashboard() {
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{fmt(t.exit_price)}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{t.reds}</td>
                       <td className={`font-mono text-xs px-3 py-2 border-b border-slate-100 font-semibold ${pnlClass(t.pnl)}`}>{sign(t.pnl)}{fmt(t.pnl)}</td>
-                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400">{new Date(t.exit_time).toLocaleTimeString("en-IN")}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400">{new Date(t.exit_time).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata" })}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -403,7 +403,7 @@ export default function Dashboard() {
                   )}
                   {orderLog.map((o) => (
                     <tr key={o.id} className="hover:bg-slate-50 transition-colors" data-testid={`order-row-${o.id}`}>
-                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400 whitespace-nowrap">{o.time ? new Date(o.time).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--"}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400 whitespace-nowrap">{o.time ? new Date(o.time).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Kolkata" }) : "--"}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.side}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.kind}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">
