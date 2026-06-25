@@ -1,0 +1,20 @@
+{
+  "summary": "Verified UX clarity changes for market-closed state and Clear Order Log flow. Seeded 2 fake order_log rows to exercise the UI clear path (real log was empty because market is closed). All five sub-cases passed: (1) header market-badge renders text 'Mkt Closed' (uppercased by CSS) with amber styling driven by state.market_open=false; status-badge ('Live'/'Idle') and feed-badge still render. (2) data-testid='order-log-closed-note' visible with text 'Market closed — bot is idle, no new orders are being placed. Rows below are past history.' (3) data-testid='clear-order-log-button' appeared while rows existed; clicking it POSTed /api/orders/log/clear, showed 'Order log cleared (...) Open position & trades are untouched.' toast, and the order log became empty; the button auto-hid when rows=0. CRITICAL spec confirmed via API: GET /api/state.position (SHORT 75 @ 24000) and GET /api/trades (count=2) are UNCHANGED after clear. POST /api/orders/log/clear returns {ok:true, cleared:N}. (4) Order timestamps render as 'DD MMM, HH:MM:SS am/pm' (e.g. '04 Jan, 04:45:30 am') — date+time, not just time. (5) Regression: GET /api/state still 200 with market_open and all legacy keys (running, price, settings, bricks, metrics, risk, expiry, angel, orders, feed_mode); dashboard loaded without error/console messages. Did NOT start the bot, place orders or square off (per LIVE-money safety note).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Order-log timestamp uses toLocaleString with day/month/hour/minute/second but no timeZone option — in this browser env it rendered in UTC (e.g. seeded 04 Jan 10:15 IST shown as 04 Jan 04:45 am). For an Indian trading bot consider forcing timeZone:'Asia/Kolkata' for consistency with the rest of the UI (expiry.ist_time is IST).",
+    "Trade Log 'Exit Time' (Dashboard.js ~line 365) still uses toLocaleTimeString only (time-only). Same date+time formatting should be applied there for parity with the new order-log style.",
+    "Dashboard.js is 745 lines — exceeds the 700-line guideline; consider splitting into smaller widget components (HeaderBadges, OrderLogWidget, ReconcileWidget, etc.) for maintainability."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a (no app auth)",
+  "seed_data_creation": "Inserted 2 TEST_ prefixed rows into MongoDB order_log collection to verify the clear button + timestamp formatting; cleared at the end of the run via the Clear button itself. Open position (TEST_entry SHORT 75 @ 24000) was already pre-seeded by a previous iteration and was left untouched (verified before/after clear).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Market is closed in preview so market_open=false and the closed-note + amber Mkt Closed badge are the visible states. An open SHORT position (qty 75 @ 24000) is persisted in mongo for testing — do not reset unless intentional. Clear Order Log only removes the order_log mongo collection + engine.orders in-memory list; it does NOT touch position or trades — confirmed.",
+  "rca of the issue": "n/a — feature verification only, no bugs found."
+}

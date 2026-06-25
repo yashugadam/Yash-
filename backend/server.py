@@ -1108,6 +1108,15 @@ async def get_order_log():
     return await db.order_log.find({}, {"_id": 0}).sort("time", -1).to_list(150)
 
 
+@api_router.post("/orders/log/clear")
+async def clear_order_log():
+    """Clear historical order-log rows (e.g. old rejections). Does NOT touch any open
+    position, trades, or broker state — purely cleans the display log."""
+    res = await db.order_log.delete_many({})
+    engine.orders = []
+    return {"ok": True, "cleared": res.deleted_count}
+
+
 @api_router.post("/orders/manual")
 async def post_manual_order(body: dict):
     side = (body.get("side") or "").upper()

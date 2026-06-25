@@ -90,6 +90,14 @@ export default function Dashboard() {
     try { const { data } = await axios.get(`${API}/orders/log`); setOrderLog(data); } catch (e) { console.debug("loadOrderLog failed (transient):", e?.message); }
   }, []);
 
+  const clearOrderLog = async () => {
+    try {
+      const { data } = await axios.post(`${API}/orders/log/clear`);
+      toast.success(`Order log cleared (${data.cleared} rows). Open position & trades are untouched.`);
+      setOrderLog([]);
+    } catch (e) { toast.error("Could not clear order log"); }
+  };
+
   useEffect(() => {
     poll(); loadTrades(); loadOrderLog();
     const a = setInterval(poll, 1000);
@@ -238,6 +246,9 @@ export default function Dashboard() {
           <span className="bg-red-600 text-white border border-red-700 px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1" data-testid="mode-badge" title="This bot trades LIVE with real money on Angel One">
             <Zap className="h-3 w-3" /> Live · Real Money
           </span>
+          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.market_open ? "bg-emerald-100 text-emerald-800 border-emerald-200" : "bg-amber-100 text-amber-800 border-amber-200"}`} data-testid="market-badge" title={state.market_open ? "NSE market open (09:15–15:30 IST)" : "Market closed — bot is idle, no orders are placed"}>
+            <span className={`h-1.5 w-1.5 rounded-full ${state.market_open ? "bg-emerald-500 pulse-dot" : "bg-amber-500"}`} /> {state.market_open ? "Mkt Open" : "Mkt Closed"}
+          </span>
           <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.running ? "bg-emerald-100 text-emerald-800 border-emerald-200" : "bg-slate-100 text-slate-500 border-slate-200"}`} data-testid="status-badge">
             <span className={`h-1.5 w-1.5 rounded-full ${state.running ? "bg-emerald-500 pulse-dot" : "bg-slate-400"}`} /> {state.running ? "Live" : "Idle"}
           </span>
@@ -361,7 +372,22 @@ export default function Dashboard() {
 
           <Widget title="Order Log" testid="order-log-widget"
             icon={<History className="h-3.5 w-3.5 text-slate-500" />}
-            right={<span className="font-mono text-[11px] text-slate-400">{orderLog.length} orders · rejections shown</span>}>
+            right={
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[11px] text-slate-400">{orderLog.length} orders</span>
+                {orderLog.length > 0 && (
+                  <button onClick={clearOrderLog} data-testid="clear-order-log-button"
+                    className="font-mono text-[10px] uppercase tracking-wider border border-slate-300 hover:bg-slate-50 text-slate-600 px-2 py-0.5 transition-colors">
+                    Clear
+                  </button>
+                )}
+              </div>
+            }>
+            {!state.market_open && (
+              <div className="bg-amber-50 border-b border-amber-100 px-3 py-1.5 font-mono text-[10px] text-amber-700" data-testid="order-log-closed-note">
+                Market closed — bot is idle, no new orders are being placed. Rows below are past history.
+              </div>
+            )}
             <div className="overflow-x-auto max-h-[280px] overflow-y-auto">
               <table className="w-full text-sm border-collapse">
                 <thead className="sticky top-0">
@@ -377,7 +403,7 @@ export default function Dashboard() {
                   )}
                   {orderLog.map((o) => (
                     <tr key={o.id} className="hover:bg-slate-50 transition-colors" data-testid={`order-row-${o.id}`}>
-                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400 whitespace-nowrap">{o.time ? new Date(o.time).toLocaleTimeString("en-IN") : "--"}</td>
+                      <td className="font-mono text-xs px-3 py-2 border-b border-slate-100 text-slate-400 whitespace-nowrap">{o.time ? new Date(o.time).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--"}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.side}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">{o.kind}</td>
                       <td className="font-mono text-xs px-3 py-2 border-b border-slate-100">
