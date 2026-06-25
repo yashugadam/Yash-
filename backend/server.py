@@ -35,6 +35,13 @@ IST = ZoneInfo("Asia/Kolkata")
 # request submitting an oversized real-money order. ~75 lots of NIFTY (lot=65).
 MAX_ORDER_QTY = 5000
 
+# Exit-retry safety: when a square-off (EXIT) order is rejected, retry — but
+# THROTTLED and CAPPED so a persistent broker rejection can't hammer the API
+# once per tick. After the cap, auto-retry halts and the position is held for
+# manual intervention.
+MAX_EXIT_RETRIES = 8
+EXIT_RETRY_MIN_GAP = 15        # seconds between auto exit-retries
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -129,6 +136,9 @@ class TradingEngine:
         self.broker_pnl = {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
         self._last_pnl_fetch = 0.0
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
+        self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
+        self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
+        self._last_reject_note = ""                    # last broker rejection reason (for alerts)
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -287,6 +297,9 @@ class TradingEngine:
                 logger.warning("EXIT dropped - no open position")
                 self.pending_exit = False
                 return
+            # A fresh exit signal (not an auto-retry) gets a full retry budget.
+            if kind == "EXIT" and reason != "EXIT_RETRY":
+                self._exit_retry_count = 0
 
             base = self.settings["buffer_points"]
             forced = reason in ("EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF",
@@ -335,6 +348,7 @@ class TradingEngine:
                     order["fill_price"] = order["limit_price"]
                 order["fill_time"] = now_iso()
                 self.exit_retry_pending = False
+                self._exit_retry_count = 0
                 if kind == "EXIT":
                     self.forced_exit_pending = False
                 self._apply_fill(order)
@@ -346,11 +360,12 @@ class TradingEngine:
                     self.pending_entry = False
                     self._set_alert(f"ENTRY order failed — {order.get('note', 'unknown reason')}. "
                                     f"No position opened.", "warning")
-                else:  # EXIT must keep trying - position is still open
+                else:  # EXIT must keep trying - position is still open (throttled + capped)
                     self.pending_exit = False
                     self.exit_retry_pending = True
-                    self._set_alert(f"EXIT order failed — {order.get('note', 'unknown reason')}. "
-                                    f"Position still OPEN — auto-retrying every tick.", "error")
+                    self._last_reject_note = order.get("note", "unknown reason")
+                    self._set_alert(f"EXIT order failed — {self._last_reject_note}. "
+                                    f"Position still OPEN — auto-retrying (throttled).", "error")
             asyncio.create_task(self._save_order(order))
         asyncio.create_task(self._persist_state())
 
@@ -549,6 +564,8 @@ class TradingEngine:
                 "reds_at_entry": self.down_run_reds, "unrealized_pnl": 0.0,
             }
             self.pending_entry = False
+            self.exit_retry_pending = False
+            self._exit_retry_count = 0
         else:  # EXIT
             if self.position:
                 entry = self.position["entry_price"]
@@ -831,10 +848,24 @@ class TradingEngine:
                         self._maybe_square_off()
                         self._check_circuit_breaker()
                         self._maybe_auto_roll()
-                        # keep retrying an exit that failed to fill (position still open)
+                        # Retry a failed EXIT — THROTTLED (>= EXIT_RETRY_MIN_GAP apart)
+                        # and CAPPED (MAX_EXIT_RETRIES) so a persistent broker rejection
+                        # can't hammer the API once per tick. After the cap, halt and hold.
                         if self.exit_retry_pending and self.position and not self.pending_exit:
-                            self.pending_exit = True
-                            asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
+                            if self._exit_retry_count >= MAX_EXIT_RETRIES:
+                                self.exit_retry_pending = False
+                                self._set_alert(
+                                    f"EXIT rejected {self._exit_retry_count}× — auto-retry HALTED to "
+                                    f"protect your account. Position is STILL OPEN and held. "
+                                    f"Last reason: {self._last_reject_note or 'unknown'}. Use Check Angel One "
+                                    f"to reconcile, then square off manually if needed.", "error")
+                            else:
+                                gap = max(self.settings.get("retry_seconds", 5), EXIT_RETRY_MIN_GAP)
+                                if time.time() - self._last_exit_retry >= gap:
+                                    self._last_exit_retry = time.time()
+                                    self._exit_retry_count += 1
+                                    self.pending_exit = True
+                                    asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
                     else:
                         # Market CLOSED: freeze the strategy entirely. No new bricks, no
                         # exits, no circuit-breaker action — the open position is held
@@ -884,6 +915,7 @@ class TradingEngine:
         self.position = None
         self.pending_entry = self.pending_exit = False
         self.exit_retry_pending = False
+        self._exit_retry_count = 0
         self.forced_exit_pending = False
         self.alert = None
         self.squared_off_date = None

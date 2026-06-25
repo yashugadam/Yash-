@@ -1,0 +1,40 @@
+{
+  "summary": "EXIT-retry throttle + cap + halt fix VERIFIED. New test file /app/backend/tests/test_exit_retry_throttle.py runs 9/9 PASS. Also re-ran iteration_7 market-freeze suite (14/14 PASS) as regression — no new failures. Bug RCA confirmed mitigated: a persistently REJECTED square-off (BUY EXIT) is now (a) THROTTLED at >= EXIT_RETRY_MIN_GAP=15s between auto-retries (in a 1.2s window with ~24 ticks, exactly 1 retry fired vs. the old 24/sec hammer), (b) CAPPED at MAX_EXIT_RETRIES=8 — at the cap, run_loop sets exit_retry_pending=False, emits a loud error alert containing 'EXIT rejected 8× — auto-retry HALTED', and the open dummy SHORT position is HELD untouched (no further _execute_order calls), and (c) COUNTER RESETS correctly on: fresh non-retry EXIT signal (server.py:301-302 top-of-_execute_order branch), EXIT fill success (server.py:350-351 success branch), and ENTRY fill (server.py:567-568 _apply_fill ENTRY). Negative case also verified: EXIT_RETRY reason does NOT reset the counter (so the cap actually accumulates). Regression: GET /api/state -> 200 with top-level market_open boolean + all legacy keys (position, bricks, settings, risk.broker_pnl). _next_price + _cur_price still ignore None/0/negative LTPs. ALL broker methods (place_limit_order, get_ltp, get_day_pnl, get_order_status, modify_order_price, cancel_order) mocked via unittest.mock; engine never started via /api/bot/start; NO real Angel One order was placed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_exit_retry_throttle.py",
+    "/app/test_reports/pytest/pytest_exit_retry.xml",
+    "/app/backend/tests/test_market_freeze.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "POSITIVE: throttle gate at server.py:863-864 uses `gap = max(settings.retry_seconds, EXIT_RETRY_MIN_GAP)` so EXIT_RETRY_MIN_GAP=15s is a HARD FLOOR even if a user widens retry_seconds — and is naturally widened further if retry_seconds is ever set above 15. Good defensive design.",
+    "POSITIVE: cap branch at server.py:855-861 flips exit_retry_pending=False BEFORE the alert and crucially does NOT touch engine.position — the open SHORT is held (carry-forward) for human-driven reconciliation, never auto-closed at any cost. Correct LIVE-money behaviour.",
+    "POSITIVE: counter increment lives ONLY in the run_loop retry block (server.py:866), not in _execute_order rejection branch (server.py:363-368). This is the right place — increments happen exactly when an auto-retry is FIRED, so a manual user-driven re-exit doesn't pollute the counter.",
+    "POSITIVE: pending_exit is set to True BEFORE asyncio.create_task(_execute_order ...) at server.py:867-868, so even though the order task is fire-and-forget, the next tick is gated by `and not self.pending_exit`. Combined with the 15s gap, this is double-protection against hammering.",
+    "POSITIVE: three independent reset paths (fresh non-retry EXIT @ server.py:301-302, EXIT fill success @ 350-351, ENTRY fill @ 567-568, reset() @ 917-918) ensure no stale counter ever blocks a legitimate fresh trade. All four verified.",
+    "POSITIVE: alert message is descriptive — includes the rejection count, the word HALTED, the last_reject_note, and tells the user to use 'Check Angel One' to reconcile. Level='error' (loud) so the UI/user notices.",
+    "MINOR (non-blocking, carried from iteration_7): server.py:1194 & 1220 still use deprecated @app.on_event — migrate to lifespan handlers when convenient. No functional impact."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_exit_retry_throttle.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 new + 14/14 regression = 23/23)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "No app auth. Live Angel One session present in preview but ALL broker methods (place_limit_order, get_ltp, get_day_pnl, get_order_status, modify_order_price, cancel_order) mocked via unittest.mock; /api/bot/start never called; /api/orders/manual never called; no real orders placed.",
+  "seed_data_creation": "None persistent. Tests temporarily set engine.position = dummy SHORT (qty=75, entry=24000), engine.exit_retry_pending, engine._exit_retry_count, settings['tick_interval']=0.05, settings['bar_seconds']=9999 inside try/finally with _snapshot_engine/_restore_engine helpers. All state fully restored on teardown. No DB writes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "EXIT-retry throttle (>=15s) + cap (8) + halt + position-held + 4 counter-reset paths are all green. Use `pytest /app/backend/tests/test_exit_retry_throttle.py /app/backend/tests/test_market_freeze.py -v --asyncio-mode=auto` for the live-money safety regression bundle. Continue patching _maybe_square_off/_check_circuit_breaker/_maybe_auto_roll and mocking _execute_order with an async side_effect that flips pending_exit=False + exit_retry_pending=True (simulating the rejection branch) when driving the run_loop in tests — this is the cleanest way to test the run_loop gate without touching the broker. Live-money rules still apply: never call /api/bot/start, never call /api/orders/manual.",
+  "rca of the issue": "RCA (resolved): Before fix, run_loop fired a new BUY EXIT via _execute_order every tick (~1/sec) whenever exit_retry_pending was True and a position was held, with no spacing and no cap — producing the observed 9:26:52→57 burst of one rejected order per second when Angel One RMS persistently rejected the square-off. Reproduction in-test: drive the run_loop with broker.place_limit_order returning {ok:False, error:'RMS rejected'} and watch _execute_order call count — old code would equal the tick count, new code shows <=2 in a 1.2s window. Mitigation now in place at server.py:851-868: (1) throttle gate `time.time() - self._last_exit_retry >= max(retry_seconds, EXIT_RETRY_MIN_GAP=15)`, (2) hard cap `self._exit_retry_count >= MAX_EXIT_RETRIES=8` flips exit_retry_pending=False and raises a loud 'auto-retry HALTED' alert while LEAVING engine.position untouched (no forced close at unsafe prices). Counter is reset on every legitimate fresh trade boundary (3 paths), so subsequent trades start with a full retry budget. All verified in 9-test pytest suite."
+}
