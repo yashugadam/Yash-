@@ -8,12 +8,12 @@ import time
 import calendar
 import logging
 from pathlib import Path
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime, timezone, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
-from angel_broker import AngelBroker
+from angel_broker import AngelBroker, safe_err
 
 
 ROOT_DIR = Path(__file__).parent
@@ -30,6 +30,10 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("renko-bot")
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# Hard cap on any single order quantity (units) — guards against a typo/abusive
+# request submitting an oversized real-money order. ~75 lots of NIFTY (lot=65).
+MAX_ORDER_QTY = 5000
 
 
 def now_iso():
@@ -373,7 +377,7 @@ class TradingEngine:
             if broker_id is None:
                 res = await asyncio.to_thread(self.broker.place_limit_order, angel_side, limit, qty)
                 if not res.get("ok"):
-                    order["note"] = f"Broker reject: {res.get('error')}"
+                    order["note"] = f"Broker reject: {safe_err(res.get('error'))}"
                     if attempt < max_attempts:
                         await asyncio.sleep(retry_secs)
                     continue
@@ -456,7 +460,12 @@ class TradingEngine:
         Independent of the strategy state machine (does not set engine.position)."""
         if not self.broker.connected:
             return {"ok": False, "message": "Angel One not connected — cannot place order."}
-        qty = int(qty or self.settings["lot_size"])
+        try:
+            qty = int(qty or self.settings["lot_size"])
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "qty must be a whole number."}
+        if qty <= 0 or qty > MAX_ORDER_QTY:
+            return {"ok": False, "message": f"qty must be between 1 and {MAX_ORDER_QTY}."}
         cur = await self._cur_price()
         buf = self.settings.get("max_slippage", 20)
         limit = cur + buf if side == "BUY" else cur - buf   # marketable limit for a quick fill
@@ -472,9 +481,9 @@ class TradingEngine:
         res = await asyncio.to_thread(self.broker.place_limit_order, side, limit, qty)
         if not res.get("ok"):
             order["status"] = "REJECTED"
-            order["note"] = f"Broker reject: {res.get('error')}"
+            order["note"] = f"Broker reject: {safe_err(res.get('error'))}"
             await self._save_order(order)
-            return {"ok": False, "message": res.get("error"), "note": order["note"]}
+            return {"ok": False, "message": safe_err(res.get("error")), "note": order["note"]}
         oid = res.get("orderid")
         order["broker_order_id"] = oid
         await asyncio.sleep(2)                               # let it work
@@ -915,20 +924,20 @@ engine = TradingEngine(db)
 
 # ----------------------------- API -----------------------------
 class SettingsUpdate(BaseModel):
-    brick_size: Optional[int] = None
-    bar_seconds: Optional[int] = None
-    lot_size: Optional[int] = None
-    buffer_points: Optional[float] = None
-    max_slippage: Optional[float] = None
-    forced_exit_slippage: Optional[float] = None
-    retry_seconds: Optional[float] = None
-    max_order_attempts: Optional[int] = None
-    max_red_single_green: Optional[int] = None
-    greens_to_exit_extended: Optional[int] = None
+    brick_size: Optional[int] = Field(None, ge=1, le=2000)
+    bar_seconds: Optional[int] = Field(None, ge=1, le=3600)
+    lot_size: Optional[int] = Field(None, ge=1, le=MAX_ORDER_QTY)
+    buffer_points: Optional[float] = Field(None, ge=0, le=2000)
+    max_slippage: Optional[float] = Field(None, ge=0, le=2000)
+    forced_exit_slippage: Optional[float] = Field(None, ge=0, le=3000)
+    retry_seconds: Optional[float] = Field(None, ge=0, le=600)
+    max_order_attempts: Optional[int] = Field(None, ge=1, le=20)
+    max_red_single_green: Optional[int] = Field(None, ge=1, le=50)
+    greens_to_exit_extended: Optional[int] = Field(None, ge=1, le=50)
     square_off_time: Optional[str] = None
     auto_square_off: Optional[bool] = None
     auto_roll: Optional[bool] = None
-    daily_max_loss: Optional[float] = None
+    daily_max_loss: Optional[float] = Field(None, ge=0, le=100_000_000)
     circuit_breaker_enabled: Optional[bool] = None
 
 

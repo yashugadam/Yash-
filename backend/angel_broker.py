@@ -7,6 +7,7 @@ and must be invoked from the engine via asyncio.to_thread.
 """
 import logging
 import os
+import re
 from contextlib import contextmanager
 from datetime import datetime, date
 
@@ -45,6 +46,33 @@ SCRIP_MASTER_URL = (
 )
 
 TICK_SIZE = 0.05   # NSE/NFO price tick — all order prices must be a multiple of this
+
+
+_CRED_URL_RE = re.compile(r'(https?://)[^/\s:@]+:[^/\s@]+@', re.IGNORECASE)
+_PROXY_HOST_RE = re.compile(r'https?://[^\s\'")]+', re.IGNORECASE)
+
+
+def safe_err(msg):
+    """Redact secrets/internals before any error string is exposed to a client.
+    Strips embedded proxy credentials and collapses noisy connection errors so the
+    proxy URL / password can never leak through a public API response or log."""
+    if not msg:
+        return ""
+    s = str(msg)
+    s = _CRED_URL_RE.sub(r'\1***:***@', s)          # user:pass@ -> ***:***@
+    low = s.lower()
+    if "proxy" in low or "max retries" in low or "connectionpool" in low or "tunnel" in low:
+        return "Order routing/proxy connection error — please retry."
+    s = _PROXY_HOST_RE.sub("[url]", s)              # drop any leftover raw URLs
+    return s[:300]
+
+
+def mask_client(code):
+    """Mask the Angel One client/account id so it isn't fully exposed publicly."""
+    code = str(code or "")
+    if len(code) <= 2:
+        return "••••" if code else ""
+    return "••••" + code[-2:]
 
 
 def round_to_tick(price, tick=TICK_SIZE):
@@ -407,11 +435,11 @@ class AngelBroker:
     def status(self):
         return {
             "connected": self.connected,
-            "client_code": self.client_code,
+            "client_code": mask_client(self.client_code),
             "name": self.profile_name,
             "future": self.fut_symbol,
             "token": self.fut_token,
             "expiry": self.fut_expiry,
             "lotsize": self.fut_lotsize,
-            "error": self.error,
+            "error": safe_err(self.error),
         }

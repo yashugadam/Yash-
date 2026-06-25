@@ -1,0 +1,60 @@
+{
+  "summary": "Verified SEC-002 (masking + safe_err) and SEC-003 (server-side validation caps). Pytest: 20/21 passed. SEC-002 PASS: angel.client_code is masked to '••••92' on /api/state and rendered as '••••92' in the dashboard DOM; angel.error is empty (acceptable) and the redaction regex/collapse logic in safe_err is in place. SEC-003 mostly PASS: oversized qty (999999, 5001, 10000), negative qty (-5), non-numeric ('abc'), and invalid side are all rejected pre-broker with the expected message 'qty must be between 1 and 5000.' /api/settings returns 422 for all 10 out-of-range payloads (lot_size 99999/0, daily_max_loss -1, brick_size 0/99999, max_order_attempts 50/0, buffer_points -1, bar_seconds 0/99999). A valid {buffer_points:20} update succeeds with HTTP 200 and persists in /api/state. Regression PASS: GET /api/state returns full snapshot (angel, risk.broker_pnl, position, bricks, settings, orders, metrics, expiry), dashboard loads with chart/trade-log/order-log/perf/risk widgets and zero blocking console errors. ONE CRITICAL SEC-003 BUG FOUND: qty=0 is NOT rejected by validation — it is silently substituted with settings.lot_size (65) and forwarded to the broker. This was observed both in the API response ({ok:false, message:'broker not connected', note:'Broker reject: broker not connected'}) and in the persisted order log (BUY MANUAL qty=65 REJECTED at 04:44:08 UTC). On a healthy broker connection this would place a REAL 1-lot order on the LIVE NIFTY future from a qty=0 request, directly violating the SEC-003 spec.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/orders/manual",
+        "issue": "qty=0 BYPASSES the 'qty must be between 1 and 5000' validation. Root cause in engine.manual_order(): `qty = int(qty or self.settings['lot_size'])` — Python short-circuits `0 or lot_size` to lot_size (65). The subsequent `if qty <= 0` check therefore never sees the original 0. Effect on a live broker: a request {side:'BUY', qty:0} attempts a real 1-lot order. Confirmed in /api/orders/log: BUY MANUAL qty=65 REJECTED at 2026-06-25T04:44:08Z note='Broker reject: broker not connected' (rejection here was incidental — broker WAS connected per /api/state; the place_limit_order path was hit). Fix: distinguish None from 0, e.g. `qty = self.settings['lot_size'] if qty is None else int(qty)` then validate.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/orders/manual",
+        "issue": "When the engine-level check `if not self.broker.connected` is False but angel_broker.place_limit_order still returns 'broker not connected' (because fut_token momentarily missing or proxy hop fails), the message surfaced to the API caller is the generic 'broker not connected' rather than a more specific reason. Consider distinguishing 'no instrument selected' from 'session dropped'."
+      },
+      {
+        "endpoint": "GET /api/orders/log",
+        "issue": "Historical rows persisted BEFORE the safe_err fix still expose the production server IP in their note: 'Broker reject: 104.198.214.223 is not a registered IP, please check your registered IP.' New errors go through safe_err and are sanitized; only the legacy rows in MongoDB leak. Consider a one-shot migration to redact existing order_log.note fields."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Order Log (Dashboard)",
+        "issues": [
+          "Old, pre-fix REJECTED rows still display the production server IP (104.198.214.223) verbatim in the REASON / REJECT DETAIL column. New errors are sanitized, so this is a historical-data leak rather than a code regression. Recommend a one-time DB cleanup of order_log.note for rows older than the safe_err deployment."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/test_reports/pytest/pytest_security_fixes.xml"
+  ],
+  "action_items": [
+    "HIGH PRIORITY — Fix engine.manual_order(): replace `qty = int(qty or self.settings['lot_size'])` with explicit None handling, e.g. `qty = self.settings['lot_size'] if qty is None else int(qty)` so qty=0 (and qty=False) fall into the existing `qty <= 0` rejection branch instead of being substituted by the default lot_size and forwarded to the broker. Then re-run TestSec003ManualOrderCap.test_nonpositive_qty_rejected[0].",
+    "MEDIUM — One-time MongoDB migration of `order_log.note` to scrub the leaked production IP (104.198.214.223) from legacy rows so it stops appearing in the dashboard Order Log.",
+    "OPTIONAL — Tighten settings bounds review: max_order_attempts upper bound is 20 (good); lot_size upper bound equals MAX_ORDER_QTY (5000) which is consistent; consider also bounding `tick_interval` and `square_off_time` (currently free-form string, no format check)."
+  ],
+  "critical_code_review_comments": [
+    "server.py:464 — `qty = int(qty or self.settings['lot_size'])` uses Python truthiness, which conflates 'caller omitted qty' (None) with 'caller sent 0' (an explicit value). This is the SEC-003 bypass. The fix is a one-liner but the bug is direct: a malicious / typo'd qty=0 POST currently routes a real 1-lot order to the LIVE broker.",
+    "server.py:1040 — POST /api/orders/manual accepts a raw `dict` body instead of a pydantic model. A typed ManualOrderRequest(BaseModel) with `side: Literal['BUY','SELL']`, `qty: int = Field(default=None, ge=1, le=MAX_ORDER_QTY)` would centralize the validation and produce a proper 422 + structured error, rather than the current 200 + {ok:false}.",
+    "angel_broker.safe_err — collapses ANY message containing the substring 'proxy' to the generic message. That is desired for proxy URLs/creds but will also collapse legitimate user-facing texts (e.g., 'order via proxy completed'). Low risk in practice but worth noting.",
+    "angel_broker.mask_client — only masks length>2 client codes; an account with a 1-2 char code would render as '••••' with no suffix. Not a security issue, just an edge case.",
+    "order_log.note historical rows are not retroactively sanitized — safe_err is applied only on write going forward. The dashboard still surfaces pre-fix raw IPs."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_fixes.py"
+  ],
+  "success_rate": {"backend": "95% (20/21)", "frontend": "100% (dashboard loads, masked client_code rendered, no console errors)"},
+  "test_credentials": "No app auth. Live Angel One session active (••••92 / NIFTY30JUN26FUT / token 62329). DO NOT click BUY/SELL with a valid qty in UI.",
+  "seed_data_creation": "None. One temporary settings update {buffer_points:20} was made and reverted to the original value in the test's finally block.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "SEC-002 verified end-to-end. SEC-003 has ONE remaining bug: qty=0 bypass on POST /api/orders/manual due to `int(qty or default)` in engine.manual_order(). After main agent fixes server.py:464, re-run `pytest /app/backend/tests/test_security_fixes.py::TestSec003ManualOrderCap::test_nonpositive_qty_rejected -v` — all 4 cases (0, -5, 'abc', missing) must return ok:false with 'qty must be between 1 and 5000.' and NO row added to /api/orders/log. CRITICAL: DO NOT place any valid-qty manual orders — live real-money account.",
+  "rca of the issue": "BUG: POST /api/orders/manual with {qty:0} bypasses the SEC-003 cap and reaches the broker. RCA: server.py:464 `qty = int(qty or self.settings['lot_size'])` uses Python's short-circuit `or` which treats 0 as falsy and substitutes settings.lot_size (65). The subsequent `if qty <= 0 or qty > MAX_ORDER_QTY` check then sees 65, passes, and the code falls through to `self.broker.place_limit_order(side, limit, qty)` — placing a real 1-lot LIMIT order on the LIVE NIFTY future. Reproduction: `curl -X POST $URL/api/orders/manual -d '{\"side\":\"BUY\",\"qty\":0}' -H 'Content-Type: application/json'`. Observed: API returned {ok:false, message:'broker not connected', note:'Broker reject: broker not connected'}, and /api/orders/log gained a row 'BUY MANUAL qty=65 REJECTED' at 04:44:08Z — proving the broker placeOrder code path executed. The rejection on the broker side here was incidental (fut_token/proxy hiccup) — on a healthy broker connection this would place a REAL order. Mitigation: change to `qty = self.settings['lot_size'] if qty is None else int(qty)` (or use a typed pydantic ManualOrderRequest with Field(ge=1, le=MAX_ORDER_QTY))."
+}
