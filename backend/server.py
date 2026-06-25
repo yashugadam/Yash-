@@ -139,6 +139,7 @@ class TradingEngine:
         self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
         self._last_reject_note = ""                    # last broker rejection reason (for alerts)
+        self._disc_flagged = False                     # True while a DISCONNECTED-pause alert is active
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -838,34 +839,48 @@ class TradingEngine:
                         if self._mkt_paused:
                             self._mkt_paused = False
                             self._set_alert("Market open — strategy resumed.", "info")
-                        await self._next_price()
-                        self.ticks_in_bar += 1
-                        self._update_unrealized()
-                        if self.ticks_in_bar >= self.settings["bar_seconds"]:
+                        await self._next_price()        # auto-reconnects if the session dropped
+                        if not self.broker.connected:
+                            # SESSION HEALTH GUARD: while Angel One is disconnected, prioritise
+                            # reconnecting and PAUSE all order activity — no bricks, no entries,
+                            # no exit retries — so we never spam rejected "not connected" orders.
+                            # The open position is held; auto-reconnect runs via _next_price.
                             self.ticks_in_bar = 0
-                            for b in self._feed_close(self.price):   # feed the BAR CLOSE
-                                self._process_brick(b)
-                        self._maybe_square_off()
-                        self._check_circuit_breaker()
-                        self._maybe_auto_roll()
-                        # Retry a failed EXIT — THROTTLED (>= EXIT_RETRY_MIN_GAP apart)
-                        # and CAPPED (MAX_EXIT_RETRIES) so a persistent broker rejection
-                        # can't hammer the API once per tick. After the cap, halt and hold.
-                        if self.exit_retry_pending and self.position and not self.pending_exit:
-                            if self._exit_retry_count >= MAX_EXIT_RETRIES:
-                                self.exit_retry_pending = False
-                                self._set_alert(
-                                    f"EXIT rejected {self._exit_retry_count}× — auto-retry HALTED to "
-                                    f"protect your account. Position is STILL OPEN and held. "
-                                    f"Last reason: {self._last_reject_note or 'unknown'}. Use Check Angel One "
-                                    f"to reconcile, then square off manually if needed.", "error")
-                            else:
-                                gap = max(self.settings.get("retry_seconds", 5), EXIT_RETRY_MIN_GAP)
-                                if time.time() - self._last_exit_retry >= gap:
-                                    self._last_exit_retry = time.time()
-                                    self._exit_retry_count += 1
-                                    self.pending_exit = True
-                                    asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
+                            if not self._disc_flagged:
+                                self._disc_flagged = True
+                                self._set_alert("Angel One DISCONNECTED — reconnecting; orders paused, "
+                                                "position held.", "error")
+                        else:
+                            if self._disc_flagged:
+                                self._disc_flagged = False
+                                self._set_alert("Angel One reconnected — strategy resumed.", "info")
+                            self.ticks_in_bar += 1
+                            self._update_unrealized()
+                            if self.ticks_in_bar >= self.settings["bar_seconds"]:
+                                self.ticks_in_bar = 0
+                                for b in self._feed_close(self.price):   # feed the BAR CLOSE
+                                    self._process_brick(b)
+                            self._maybe_square_off()
+                            self._check_circuit_breaker()
+                            self._maybe_auto_roll()
+                            # Retry a failed EXIT — THROTTLED (>= EXIT_RETRY_MIN_GAP apart)
+                            # and CAPPED (MAX_EXIT_RETRIES) so a persistent broker rejection
+                            # can't hammer the API once per tick. After the cap, halt and hold.
+                            if self.exit_retry_pending and self.position and not self.pending_exit:
+                                if self._exit_retry_count >= MAX_EXIT_RETRIES:
+                                    self.exit_retry_pending = False
+                                    self._set_alert(
+                                        f"EXIT rejected {self._exit_retry_count}× — auto-retry HALTED to "
+                                        f"protect your account. Position is STILL OPEN and held. "
+                                        f"Last reason: {self._last_reject_note or 'unknown'}. Use Check Angel One "
+                                        f"to reconcile, then square off manually if needed.", "error")
+                                else:
+                                    gap = max(self.settings.get("retry_seconds", 5), EXIT_RETRY_MIN_GAP)
+                                    if time.time() - self._last_exit_retry >= gap:
+                                        self._last_exit_retry = time.time()
+                                        self._exit_retry_count += 1
+                                        self.pending_exit = True
+                                        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
                     else:
                         # Market CLOSED: freeze the strategy entirely. No new bricks, no
                         # exits, no circuit-breaker action — the open position is held

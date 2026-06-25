@@ -1,0 +1,33 @@
+{
+  "summary": "SESSION HEALTH GUARD verified. New /app/backend/tests/test_session_health_guard.py runs 7/7 PASS. Regression bundle (exit-retry throttle 9/9 + market freeze 14/14) = 30/30 PASS. The disconnected-burst RCA is mitigated: while engine.running=True, _market_open()=True, broker.connected=False, run_loop now (a) STILL calls _next_price() so auto-reconnect fires, (b) does NOT call _process_brick, (c) does NOT call _execute_order (no entries, no exit retries) -- 0 calls observed over ~16 ticks at 0.05s/tick, (d) resets ticks_in_bar to 0, (e) sets engine._disc_flagged=True, (f) sets a single 'Angel One DISCONNECTED -- reconnecting; orders paused, position held.' alert at level=error -- subsequent ticks while still disconnected do NOT re-emit the alert (gated by _disc_flagged; only 1 DISCONNECTED alert seen in 16-tick window). On reconnect (broker.connected flipped back to True), _disc_flagged clears to False, a SINGLE 'Angel One reconnected -- strategy resumed.' alert is set, ticks_in_bar increments, _update_unrealized recomputes pnl correctly (entry 24000 - price 24050) * 75 = -3750. Pre-set dummy SHORT (qty=75, entry=24000) remained unchanged throughout. Market-closed regression also passes: when _market_open()=False, the disconnect branch is NOT entered; instead the existing 'Market closed -- strategy paused' freeze branch runs (position held, ticks_in_bar=0, no orders). /api/state still 200 with market_open + legacy keys. ALL broker methods mocked (broker.connected, place_limit_order, get_ltp, get_day_pnl, get_order_status). Engine NEVER started via /api/bot/start; no real Angel One order placed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_session_health_guard.py",
+    "/app/test_reports/pytest/pytest_session_health_guard.xml",
+    "/app/backend/tests/test_exit_retry_throttle.py",
+    "/app/backend/tests/test_market_freeze.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "POSITIVE: server.py:843-856 -- the disconnect guard sits AFTER await self._next_price(), which means auto-reconnect (inside _next_price -> _auto_reconnect, throttled 20s) keeps running even while orders are paused. Correct ordering: reconnect first, then decide.",
+    "POSITIVE: _disc_flagged init in __init__ (server.py:142) ensures a clean True/False transition state machine -- no NoneType ambiguity. Mirrors _mkt_paused pattern.",
+    "POSITIVE: Reset of ticks_in_bar=0 on every disconnected tick (server.py:848) is essential -- prevents a stale tick counter from instantly closing a bar the moment we reconnect mid-window.",
+    "POSITIVE: The alert is gated by `if not self._disc_flagged:` BEFORE flipping the flag, so even though run_loop runs ~1/sec, only ONE alert is raised on the disconnect transition. Verified empirically over 16 ticks.",
+    "POSITIVE: The else branch (server.py:853-856) clears _disc_flagged AND emits a single 'reconnected' alert -- symmetric design. Verified single-alert-on-resume.",
+    "POSITIVE: With the guard active, the exit-retry block at 869-883 is UNREACHABLE (it's inside the connected else branch), so the iteration_8 retry counter cannot accumulate while disconnected. This is exactly what closes the live-money 'rejected-order burst' vector at market open.",
+    "POSITIVE: Position is never touched in the disconnect branch -- the open SHORT is held verbatim, consistent with the carry-forward + manual-reconcile philosophy used by the cap-halt branch and the market-closed freeze branch.",
+    "MINOR (carried, non-blocking): server.py:1209 & 1235 still use deprecated @app.on_event -- migrate to lifespan when convenient. No functional impact."
+  ],
+  "updated_files": ["/app/backend/tests/test_session_health_guard.py (new)"],
+  "success_rate": {
+    "backend": "100% (7/7 new + 23/23 regression = 30/30)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "No app auth. Live Angel One session present in preview but ALL broker methods mocked (broker.connected, place_limit_order, get_ltp, get_day_pnl, get_order_status). /api/bot/start never called. No real orders placed.",
+  "seed_data_creation": "None persistent. Tests temporarily set engine.position=dummy SHORT (qty=75, entry=24000), engine._disc_flagged, engine.broker.connected, engine.running, settings.tick_interval=0.05, settings.bar_seconds=9999 inside try/finally with _snapshot_engine/_restore_engine helpers. No DB writes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Session-health guard (disconnect pause + single alert + reconnect resume + single resume alert) is green. Regression bundle: `pytest /app/backend/tests/test_session_health_guard.py /app/backend/tests/test_exit_retry_throttle.py /app/backend/tests/test_market_freeze.py -v --asyncio-mode=auto` = 30/30. Pattern for driving run_loop in tests: patch _market_open, _maybe_square_off/_check_circuit_breaker/_maybe_auto_roll, _execute_order (async side_effect), _next_price (async no-op), and broker.get_day_pnl; spawn run_loop as asyncio task; sleep ~0.4-0.8s with tick_interval=0.05; cancel + await. Live-money rules still apply: never call /api/bot/start, never call /api/orders/manual.",
+  "rca of the issue": "RCA (resolved): Pre-fix at market open with Angel One session DROPPED, run_loop entered the connected-path code at top-of-market-open (no connectivity check), and the exit-retry block kept firing _execute_order BUY EXIT every tick. _execute_order's early-return branch (server.py:330-342) flagged status=REJECTED with 'Angel One not connected', leaving exit_retry_pending=True and pending_exit=False -- which the next tick happily picked up again. Net effect: 1 rejected order per tick burst (the iteration_8 throttle/cap added 15s spacing + halt at 8, but the alert log was still noisy and the bot still tried to TRADE while session was dead). Mitigation now at server.py:843-856: the run_loop branches IMMEDIATELY after _next_price() on broker.connected: if False -> reset ticks_in_bar=0, raise the DISCONNECTED alert ONCE via _disc_flagged gate, and skip ALL strategy code (no bricks, no entries, no exit retries, no circuit-breaker, no auto-roll). If True (or once reconnected) -> clear _disc_flagged, emit single 'reconnected' alert, resume normal processing. The dropped session is now invisible to the strategy state machine -- no rejected-order spam can ever be produced because no orders are attempted at all while disconnected. Verified by 7 new tests + 23 regression tests."
+}
