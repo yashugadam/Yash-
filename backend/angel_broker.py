@@ -13,16 +13,31 @@ from datetime import datetime, date
 import pyotp
 import requests
 from SmartApi import SmartConnect
+from urllib.parse import urlsplit, urlunsplit, quote
 
 logger = logging.getLogger("renko-bot.angel")
 
 
 def _angel_proxies():
-    """If ANGEL_PROXY_URL is set, route ALL Angel One API calls through it so Angel
+    """If ANGEL_PROXY_URL is set, route Angel One order calls through it so Angel
     sees the proxy's (whitelisted static) IP instead of the app server's shared IP.
-    Format: http://USER:PASS@HOST:PORT  (or http://HOST:PORT for an open proxy)."""
+    Format: http://USER:PASS@HOST:PORT  (or http://HOST:PORT for an open proxy).
+
+    Safety net: if the URL has no embedded credentials but ANGEL_PROXY_USER /
+    ANGEL_PROXY_PASS are set, inject them so the proxy never returns a
+    407 Proxy Authentication Required due to a stray credential-less URL."""
     url = os.environ.get("ANGEL_PROXY_URL", "").strip()
-    return {"http": url, "https": url} if url else {}
+    if not url:
+        return {}
+    user = os.environ.get("ANGEL_PROXY_USER", "").strip()
+    pwd = os.environ.get("ANGEL_PROXY_PASS", "").strip()
+    if user and pwd:
+        parts = urlsplit(url)
+        if "@" not in parts.netloc:  # no creds already embedded
+            creds = f"{quote(user, safe='')}:{quote(pwd, safe='')}"
+            url = urlunsplit((parts.scheme, f"{creds}@{parts.netloc}",
+                              parts.path, parts.query, parts.fragment))
+    return {"http": url, "https": url}
 
 
 SCRIP_MASTER_URL = (
