@@ -347,6 +347,36 @@ class AngelBroker:
             logger.warning("cancelOrder failed: %s", e)
             return {"ok": False, "error": self.error}
 
+    def get_day_pnl(self):
+        """Real booked P&L for the day from Angel One's position book — reflects
+        ALL fills (bot, manual panel, or orders placed outside this app).
+        Returns {found, realised, unrealised, total}."""
+        def _num(d, *keys):
+            for k in keys:
+                v = d.get(k)
+                if v not in (None, ""):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        pass
+            return 0.0
+        try:
+            with self._order_proxy():
+                res = self.smart.position()
+            if res.get("status"):
+                realised = unrealised = 0.0
+                for p in res.get("data") or []:
+                    realised += _num(p, "realised", "realized", "m2mrealised", "m2mrealized")
+                    unrealised += _num(p, "unrealised", "unrealized", "m2munrealised", "m2munrealized")
+                return {"found": True, "realised": round(realised, 2),
+                        "unrealised": round(unrealised, 2),
+                        "total": round(realised + unrealised, 2)}
+            self.error = str(res.get("message") or res)
+        except Exception as e:
+            self.error = str(e)
+            logger.warning("get_day_pnl failed: %s", e)
+        return {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
+
     def get_net_position(self):
         """Net quantity for the selected future token. Negative = short, positive = long.
         Returns {found, netqty, avgprice}. found=True with netqty=0 means flat."""

@@ -121,6 +121,9 @@ class TradingEngine:
         self.day_realized = 0.0                       # realized P&L booked today
         self.breaker_tripped = False
         self._last_reconnect = 0.0                     # throttle for auto-reconnect
+        # real broker P&L (from Angel One position book — reflects manual + bot fills)
+        self.broker_pnl = {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
+        self._last_pnl_fetch = 0.0
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -770,12 +773,26 @@ class TradingEngine:
             self._set_alert("Angel One session reconnected automatically.", "info")
             logger.info("Auto-reconnected Angel One (session had dropped)")
 
+    async def _refresh_broker_pnl(self):
+        """Pull real day P&L from Angel One (throttled ~8s). Runs whether or not the
+        bot is 'running', so manual-panel trades are reflected too."""
+        if not self.broker.connected:
+            return
+        now = time.time()
+        if now - self._last_pnl_fetch < 8:
+            return
+        self._last_pnl_fetch = now
+        pnl = await asyncio.to_thread(self.broker.get_day_pnl)
+        if pnl.get("found"):
+            self.broker_pnl = pnl
+
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
     # (every bar_seconds), using that bar's close price - just like TradingView 1m Renko.
     async def run_loop(self):
         while True:
             try:
+                await self._refresh_broker_pnl()
                 if self.running:
                     await self._next_price()
                     self.ticks_in_bar += 1
@@ -883,6 +900,7 @@ class TradingEngine:
                 "day_realized": round(day_real, 2),
                 "day_total": round(day_real + unreal, 2),
                 "breaker_tripped": breaker,
+                "broker_pnl": self.broker_pnl,
             },
             "metrics": {**m, "win_rate": win_rate,
                         "unrealized_pnl": self.position["unrealized_pnl"] if self.position else 0.0},

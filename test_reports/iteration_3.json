@@ -1,0 +1,41 @@
+{
+  "summary": "Verified the new 'Angel One Day P&L (live)' feature (real day P&L pulled from Angel One position book so manual orders are reflected on the dashboard). Backend pytest suite (test_broker_pnl.py): 5/5 PASSED — risk.broker_pnl shape (found/realised/unrealised/total), values are numeric, total == realised + unrealised, repeated /api/state polling (12x @0.4s) stays 200 with no engine errors, and broker_pnl.found becomes True within ~8s (throttle window) confirming the broker fetch path runs. Live values observed: realised=-357.50, unrealised=0.00, total=-357.50 (matches the ~-357.5 expected by the user from today's manual fills). Existing risk.day_total and risk.daily_max_loss still present. Frontend Playwright: broker-pnl-block renders inside risk-widget with broker-realised-pnl='-357.50', broker-unrealised-pnl='0.00', broker-total-pnl='-357.50', SYNCED badge present, 'Angel One Day P&L' heading present, existing day-pnl='0.00' still renders, zero console errors. NO orders were placed and bot was NOT started — strict read-only verification per the live-money safety note.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/state", "issue": "When Angel One session drops and get_day_pnl returns found=False, snapshot keeps the previous (stale) broker_pnl values silently. Consider exposing a 'last_synced_at' timestamp or setting found=False so the SYNCED badge clears."},
+      {"endpoint": "_refresh_broker_pnl (engine loop)", "issue": "Exceptions raised by asyncio.to_thread(self.broker.get_day_pnl) are not caught inside _refresh_broker_pnl itself — relies on get_day_pnl's internal try/except. If a future code path bypasses that, a single PnL fetch error could break the entire run_loop iteration. Recommend a try/except around the to_thread call."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard · Risk widget", "issues": ["The 'Angel One Day P&L (live)' block uses a SYNCED badge that stays green even if broker drops mid-session (driven by broker_pnl.found which stays True on the last good fetch). Consider showing freshness (e.g., last update ts) or a STALE state."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_broker_pnl.py",
+    "/app/test_reports/pytest/pytest_broker_pnl.xml"
+  ],
+  "action_items": [
+    "(Optional) Add a 'last_synced_at' epoch on broker_pnl and clear/dim the SYNCED badge if older than e.g. 30s, so users notice if the broker session has gone stale while manual P&L appears frozen.",
+    "(Optional) Wrap the to_thread(get_day_pnl) call inside _refresh_broker_pnl with try/except defensively, even though get_day_pnl already catches internally.",
+    "(Optional) Expose broker.connected at the top level of /api/state (snapshot) — currently the only signal of broker liveness is risk.broker_pnl.found. A dedicated broker:{connected:bool} would make the UI 'SYNCED' badge logic crisper and aid testing."
+  ],
+  "critical_code_review_comments": [
+    "server.py snapshot() — no top-level 'broker' key (e.g., connected/last_error). Tests and the UI must infer broker liveness from risk.broker_pnl.found, which conflates 'fetch ever succeeded' with 'broker currently connected'.",
+    "server.py _refresh_broker_pnl keeps the previous broker_pnl dict when a refresh fails (found=False). This is intentional to avoid flicker but means the dashboard can show stale numbers indefinitely after a session drop. Consider a staleness threshold.",
+    "angel_broker.get_day_pnl — sums realised across ALL positions in the book, not just the selected FUT token. If the user has positions in other instruments on the same account, those P&Ls leak into the dashboard's 'Angel One Day P&L'. The dashboard description says 'Real booked P&L from your Angel One account' which technically matches, but if the intent is 'this bot's instrument only', it should filter by self.fut_token like get_net_position does."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_broker_pnl.py"
+  ],
+  "success_rate": {"backend": "100% (5/5)", "frontend": "100% (all UI selectors + values + no console errors)"},
+  "test_credentials": "No app auth. Angel One auto-connects from backend .env (LIVE session active during test — broker_pnl.found=True observed).",
+  "seed_data_creation": "None. Read-only tests. No orders placed, bot not started.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Live broker is connected; risk.broker_pnl on /api/state currently returns {found:true, realised:-357.5, unrealised:0.0, total:-357.5}. Dashboard's risk-widget includes a broker-pnl-block with three values (data-testids broker-realised-pnl/broker-unrealised-pnl/broker-total-pnl) and a SYNCED badge. CRITICAL: do not click BUY/SELL buttons or START — this is a LIVE money trading account. Test failures around manual-order PLACEMENT are out of scope; the request was specifically about display of broker P&L from the position book.",
+  "rca of the issue": "Original bug: manual orders fired via the Manual Order panel hit Angel One but engine's local self.day_realized only knew about bot fills, so dashboard Day P&L stayed at 0 while the broker actually booked the P&L. Fix verified: TradingEngine._refresh_broker_pnl (throttled 8s) calls angel_broker.get_day_pnl, which calls smart.position() and aggregates realised/unrealised across the position book. snapshot() exposes this as risk.broker_pnl and the Dashboard renders a dedicated 'Angel One Day P&L (live)' block. End-to-end live values are now visible to the user. No regressions detected on existing day-pnl, max-loss, breaker-armed display."
+}
