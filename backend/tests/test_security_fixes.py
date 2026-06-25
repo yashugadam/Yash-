@@ -80,10 +80,38 @@ class TestSec002Masking:
                         f"angel.error contains {forbidden!r} (should be collapsed): {err!r}")
 
 
+    def test_order_log_has_no_raw_ip_or_url(self, session):
+        """SEC-002 re-confirm: legacy + new order_log rows must not leak bare
+        IPv4 addresses or http URLs in `note`."""
+        r = session.get(f"{API}/orders/log", timeout=15)
+        assert r.status_code == 200
+        rows = r.json()
+        ipv4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+        leaks = []
+        for row in rows:
+            note = str(row.get("note", "")) + " " + str(row.get("text", ""))
+            low = note.lower()
+            if ipv4.search(note):
+                leaks.append(("ip", note))
+            if "http://" in low or "https://" in low:
+                leaks.append(("url", note))
+        assert not leaks, f"order_log leaks: {leaks[:5]}"
+
+
 # ---------------- SEC-003: manual order qty validation ----------------
+def _order_log_len(session):
+    r = session.get(f"{API}/orders/log", timeout=15)
+    assert r.status_code == 200
+    return len(r.json())
+
+
 class TestSec003ManualOrderCap:
+    """All invalid qty requests MUST be rejected pre-broker AND must NOT add a
+    row to /api/orders/log (proves the broker code path was not reached)."""
+
     @pytest.mark.parametrize("qty", [999999, 5001, 10000])
     def test_oversized_qty_rejected_pre_broker(self, session, qty):
+        before = _order_log_len(session)
         r = session.post(f"{API}/orders/manual",
                          json={"side": "BUY", "qty": qty}, timeout=15)
         assert r.status_code == 200, r.text
@@ -92,34 +120,48 @@ class TestSec003ManualOrderCap:
         msg = data.get("message", "")
         assert "qty must be between 1 and 5000" in msg, \
             f"unexpected rejection msg: {msg!r}"
-        # broker order id must NOT exist (proves no broker call)
-        assert "broker_order_id" not in data or not data.get("broker_order_id")
+        assert not data.get("broker_order_id")
+        after = _order_log_len(session)
+        assert after == before, \
+            f"order_log grew for invalid qty={qty} ({before}->{after}) — broker path was hit!"
 
     @pytest.mark.parametrize("qty", [0, -5])
     def test_nonpositive_qty_rejected(self, session, qty):
+        before = _order_log_len(session)
         r = session.post(f"{API}/orders/manual",
                          json={"side": "BUY", "qty": qty}, timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data.get("ok") is False
-        assert "qty must be between 1 and 5000" in data.get("message", "")
+        assert data.get("ok") is False, f"qty={qty} NOT rejected: {data}"
+        assert "qty must be between 1 and 5000" in data.get("message", ""), \
+            f"unexpected msg for qty={qty}: {data.get('message')!r}"
+        assert not data.get("broker_order_id")
+        after = _order_log_len(session)
+        assert after == before, \
+            f"order_log grew for qty={qty} ({before}->{after}) — qty=0 bypass NOT fixed!"
 
     def test_non_numeric_qty_rejected(self, session):
+        before = _order_log_len(session)
         r = session.post(f"{API}/orders/manual",
                          json={"side": "BUY", "qty": "abc"}, timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
         assert data.get("ok") is False
-        assert "whole number" in data.get("message", "").lower() \
-            or "qty must" in data.get("message", "").lower()
+        assert "whole number" in data.get("message", "").lower(), \
+            f"expected 'whole number' message, got: {data.get('message')!r}"
+        after = _order_log_len(session)
+        assert after == before, "order_log grew for non-numeric qty"
 
     def test_invalid_side_rejected(self, session):
+        before = _order_log_len(session)
         r = session.post(f"{API}/orders/manual",
                          json={"side": "HOLD", "qty": 1}, timeout=15)
         assert r.status_code == 200
         data = r.json()
         assert data.get("ok") is False
         assert "side" in data.get("message", "").lower()
+        after = _order_log_len(session)
+        assert after == before, "order_log grew for invalid side"
 
 
 # ---------------- SEC-003: settings field bounds ----------------

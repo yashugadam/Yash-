@@ -461,7 +461,7 @@ class TradingEngine:
         if not self.broker.connected:
             return {"ok": False, "message": "Angel One not connected — cannot place order."}
         try:
-            qty = int(qty or self.settings["lot_size"])
+            qty = self.settings["lot_size"] if qty is None else int(qty)
         except (TypeError, ValueError):
             return {"ok": False, "message": "qty must be a whole number."}
         if qty <= 0 or qty > MAX_ORDER_QTY:

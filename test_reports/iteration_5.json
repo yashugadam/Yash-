@@ -1,0 +1,32 @@
+{
+  "summary": "RETEST PASS: SEC-003 critical bug (qty=0 bypass) is FIXED, and SEC-002 IP/URL scrub holds end-to-end. Pytest: 22/22 passed. The fix at server.py:464 (`qty = self.settings['lot_size'] if qty is None else int(qty)`) now correctly distinguishes 'missing' from 'explicit 0'. All invalid manual-order requests — qty=0, qty=-5, qty='abc', qty=5001, qty=999999, qty=10000, side='HOLD' — are rejected pre-broker with the expected message AND /api/orders/log row count does NOT grow (proves the broker code path was not reached). qty=0 / qty=-5 / qty>5000 return {ok:false, message:'qty must be between 1 and 5000.'}; qty='abc' returns {ok:false, message:'qty must be a whole number.'}. SEC-002 re-confirm PASS: angel.client_code masked ('••••92'), angel.error empty/sanitized, /api/orders/log no longer contains any raw IPv4 address or http URL in `note` (legacy leak from iteration_4 has been scrubbed; new errors go through safe_err which now also redacts bare IPs to '[ip]'). Settings caps still hold: 10/10 out-of-range payloads return HTTP 422; {buffer_points:20} returns 200 and persists. Regression PASS: /api/state returns full snapshot with angel, risk.broker_pnl, position, bricks, settings, orders, metrics, expiry keys. Per the live-money safety brief, no {side:BUY} request without qty was sent and no valid-qty manual order was placed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_security_fixes.py",
+    "/app/test_reports/pytest/pytest_security_fixes.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:464 fix is correct and minimal: `qty = self.settings['lot_size'] if qty is None else int(qty)` properly distinguishes 'omitted qty' (None -> default lot_size) from 'explicit 0' (now hits the `qty <= 0` rejection branch). The TypeError/ValueError branch correctly catches non-numeric input ('abc') with the 'whole number' message.",
+    "OPTIONAL — Consider promoting POST /api/orders/manual to a typed pydantic ManualOrderRequest(side: Literal['BUY','SELL'], qty: Optional[int] = Field(None, ge=1, le=MAX_ORDER_QTY)) to return proper HTTP 422 instead of the current HTTP 200 + {ok:false} pattern (cosmetic — functional behaviour is already secure).",
+    "OPTIONAL — angel_broker.safe_err still collapses any message containing the substring 'proxy' to a generic text; benign user-facing phrases like 'order via proxy completed' would also be collapsed. Low practical risk for this app since the only places that emit such strings are network errors."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_fixes.py"
+  ],
+  "success_rate": {"backend": "100% (22/22)", "frontend": "not retested (backend-only request)"},
+  "test_credentials": "No app auth. Live Angel One session active (client ••••92). Per safety brief, only validation-REJECTION paths were exercised; no broker calls were made.",
+  "seed_data_creation": "None. Temporary settings update {buffer_points:20} made and restored to original in test teardown.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "SEC-002 and SEC-003 both fully verified. Test file /app/backend/tests/test_security_fixes.py now asserts /api/orders/log row count does NOT grow on every invalid-qty path — this is the strongest available proof that the broker code path is not reached pre-validation. If new code touches engine.manual_order() or /api/orders/manual, re-run `pytest /app/backend/tests/test_security_fixes.py -v` before any production deploy. The {side:BUY} with no qty case is intentionally NOT tested (it would default to lot_size and place a real 1-lot order on the LIVE account).",
+  "rca of the issue": "Previous iteration_4 RCA: `qty = int(qty or self.settings['lot_size'])` short-circuited on qty=0 -> default lot_size, bypassing the cap. Current fix at server.py:464 `qty = self.settings['lot_size'] if qty is None else int(qty)` evaluates None-ness explicitly, so qty=0 now flows to `if qty <= 0` and is rejected. Verified by: (a) API response {ok:false, message:'qty must be between 1 and 5000.'} for qty=0, (b) /api/orders/log row count unchanged before vs after every invalid request, (c) no broker_order_id in the response payload."
+}

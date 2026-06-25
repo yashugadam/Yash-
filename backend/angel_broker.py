@@ -50,6 +50,7 @@ TICK_SIZE = 0.05   # NSE/NFO price tick — all order prices must be a multiple 
 
 _CRED_URL_RE = re.compile(r'(https?://)[^/\s:@]+:[^/\s@]+@', re.IGNORECASE)
 _PROXY_HOST_RE = re.compile(r'https?://[^\s\'")]+', re.IGNORECASE)
+_IPV4_RE = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b')
 
 
 def safe_err(msg):
@@ -64,6 +65,7 @@ def safe_err(msg):
     if "proxy" in low or "max retries" in low or "connectionpool" in low or "tunnel" in low:
         return "Order routing/proxy connection error — please retry."
     s = _PROXY_HOST_RE.sub("[url]", s)              # drop any leftover raw URLs
+    s = _IPV4_RE.sub("[ip]", s)                     # redact bare IP addresses
     return s[:300]
 
 
