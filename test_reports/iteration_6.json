@@ -1,0 +1,42 @@
+{
+  "summary": "Market-hours FREEZE testing complete (backend-only, in-process pytest). 13/14 tests pass. CRITICAL FINDING: the LTP <= 0 garbage guard in `_next_price()` is NOT actually implemented in /app/backend/server.py:774 — current code is `if ltp is not None:` (missing `and ltp > 0`). As a result, when Angel One returns ltp=0 (overnight / pre-open), engine.price IS overwritten to 0, which is exactly the failure the review request set out to prevent and could form spurious Renko bricks on a live-money carry-forward position. All other parts of the fix are verified working: `_market_open()` truth table (Mon–Fri 09:15–15:30 IST, Sat/Sun closed, 09:14 closed, 15:30:01 closed, 00:30 closed) — 10/10 parametrised cases PASS. MARKET-CLOSED FREEZE (the core fix) PASS: with _market_open()->False and engine.running=True, run_loop forms zero new bricks, holds the dummy SHORT position byte-for-byte (qty=75 / entry=24000), resets ticks_in_bar to 0, sets _mkt_paused=True, emits a 'Market closed — strategy paused' alert, and `_process_brick`/`get_ltp`/`place_limit_order` are NEVER called. MARKET-OPEN path PASS (with _maybe_square_off / _check_circuit_breaker / _maybe_auto_roll patched out because real IST is currently past 15:00 and the expiry-day square-off would otherwise fire and place a real BUY-to-exit on the dummy SHORT — this is unrelated to the gate being tested): ticks_in_bar increments, _mkt_paused cleared, unrealized recomputed correctly for SHORT [(24000-24050)*75=-3750], position object identity preserved, place_limit_order NEVER called. Regression PASS: GET /api/state -> 200, top-level boolean `market_open` present (=false right now, expected), all legacy keys (position, bricks, settings, risk.broker_pnl) intact. All broker calls were mocked; no real Angel One orders were placed; bot was never started via /api/bot/start.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "TradingEngine._next_price() @ /app/backend/server.py:773-779",
+        "issue": "LTP garbage guard is MISSING. Current code `if ltp is not None: self.price = ltp` lets ltp=0 (and any non-None falsy/negative numeric) overwrite engine.price to 0. After-hours / pre-open Angel One ticks of 0 (the exact 'garbage LTP' the review request calls out) will be accepted, prev_price will be set to the last good price, and engine.price will become 0 — this could then form a huge spurious DOWN Renko brick on the next bar close and falsely exit a carry-forward SHORT or trip the circuit breaker. Fix per spec: `if ltp is not None and ltp > 0:`. Test `TestLtpGarbageGuard::test_zero_and_none_ltp_do_not_update_price` reproduces it: after `broker.get_ltp` returns 0, `engine.price == 0` (expected: remain at 24000.0).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_market_freeze.py",
+    "/app/test_reports/pytest/pytest_market_freeze.xml"
+  ],
+  "action_items": [
+    "PATCH /app/backend/server.py:774 — change `if ltp is not None:` to `if ltp is not None and ltp > 0:` so that ltp=0 / negative is treated as 'no price update' (drops into the existing else-branch that just sets feed_error). After the patch, re-run `pytest /app/backend/tests/test_market_freeze.py -v` and expect 14/14."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/server.py:774 missing `and ltp > 0` guard — primary safety bug, see backend_issues.critical above.",
+    "Code review (POSITIVE): the FREEZE branch at server.py:838-846 is correctly structured — `ticks_in_bar=0` reset, idempotent _mkt_paused flip, single alert, and NO call to _process_brick / _maybe_square_off / _check_circuit_breaker / _maybe_auto_roll while market is closed. This is the right behaviour for a carry-forward live-money position.",
+    "Code review (POSITIVE): `_market_open()` uses inclusive bounds on both 09:15:00 and 15:30:00 IST, which matches NSE F&O regular session. Weekday check `>=5` correctly excludes Sat/Sun.",
+    "MINOR: server.py:907 `market_open` key is computed by calling `self._market_open()` again inside snapshot() — fine, but if you ever cache it on the engine (e.g. last_market_open) make sure snapshot() reads the cached value to keep /api/state and the run_loop branch in lock-step.",
+    "MINOR (live-money hygiene, not a bug): the open-path test had to patch out `_maybe_square_off` / `_check_circuit_breaker` / `_maybe_auto_roll` because the real IST in the preview is past the 15:00 square-off cutoff. In production this is fine, but if you ever add a unit-test-only flag to suppress square-off, prefer monkey-patching `_expiry_status` rather than the helpers themselves so future devs can't accidentally bypass the breaker in prod."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_market_freeze.py"
+  ],
+  "success_rate": {"backend": "92.8% (13/14)", "frontend": "not tested (backend-only request)"},
+  "test_credentials": "No app auth. Live Angel One session active. All broker methods mocked via unittest.mock; no /api/bot/start, no /api/orders/manual sent.",
+  "seed_data_creation": "None persistent. In-process tests temporarily set engine.position = dummy SHORT and engine.settings['tick_interval']=0.05 / settings['bar_seconds']=9999 inside try/finally; all restored on teardown. No DB writes, no real orders.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "After main agent patches server.py:774 with `if ltp is not None and ltp > 0:`, just re-run `pytest /app/backend/tests/test_market_freeze.py -v --asyncio-mode=auto` — should be 14/14. The test file is the source of truth for: (a) _market_open truth table, (b) FREEZE branch invariants (no bricks, position untouched, _mkt_paused=True, alert set, ticks reset, no broker calls), (c) LTP garbage guard, (d) /api/state contract. The open-path test deliberately patches _maybe_square_off / _check_circuit_breaker / _maybe_auto_roll because the live preview IST is currently past 15:00 and would otherwise place a real BUY-to-exit on the dummy SHORT — DO NOT remove those patches.",
+  "rca of the issue": "RCA of LTP=0 bug: server.py:774 reads `if ltp is not None:` only. Angel One's get_ltp() returns 0 (not None) on after-hours / illiquid ticks. With the current guard, `self.prev_price = self.price; self.price = 0; self.feed_error = ''` executes, so the engine's price source jumps to 0 silently and the next bar close feeds price=0 into `_feed_close()`, generating a massive DOWN brick that could (a) close a carry-forward SHORT for fake profit, (b) trigger the daily-loss circuit breaker. Mitigation: tighten the guard to `if ltp is not None and ltp > 0:` — falls through to the `else` branch that just records feed_error, leaving self.price/self.prev_price untouched. Reproduction (without broker): pytest test `TestLtpGarbageGuard` — set engine.price=24000, mock broker.get_ltp -> 0, await engine._next_price(), observe engine.price becomes 0."
+}

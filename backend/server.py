@@ -128,6 +128,7 @@ class TradingEngine:
         # real broker P&L (from Angel One position book — reflects manual + bot fills)
         self.broker_pnl = {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
         self._last_pnl_fetch = 0.0
+        self._mkt_paused = False                       # True while strategy is frozen (market closed)
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -603,6 +604,16 @@ class TradingEngine:
                 (self.position["entry_price"] - self.price) * self.position["qty"], 2)
 
     # -------- expiry / square-off --------
+    def _market_open(self):
+        """NSE F&O trading window: Mon–Fri, 09:15–15:30 IST. Outside this window the
+        strategy freezes (no brick formation, no exits, no circuit-breaker action) so
+        after-hours/overnight garbage LTP from Angel One cannot create bricks or touch
+        an open carry-forward position."""
+        ist = datetime.now(IST)
+        if ist.weekday() >= 5:        # 5 = Saturday, 6 = Sunday
+            return False
+        return dtime(9, 15) <= ist.time() <= dtime(15, 30)
+
     def _expiry_status(self):
         ist = datetime.now(IST)
         today = ist.date()
@@ -806,21 +817,34 @@ class TradingEngine:
             try:
                 await self._refresh_broker_pnl()
                 if self.running:
-                    await self._next_price()
-                    self.ticks_in_bar += 1
-                    self._update_unrealized()
-                    if self.ticks_in_bar >= self.settings["bar_seconds"]:
+                    if self._market_open():
+                        if self._mkt_paused:
+                            self._mkt_paused = False
+                            self._set_alert("Market open — strategy resumed.", "info")
+                        await self._next_price()
+                        self.ticks_in_bar += 1
+                        self._update_unrealized()
+                        if self.ticks_in_bar >= self.settings["bar_seconds"]:
+                            self.ticks_in_bar = 0
+                            for b in self._feed_close(self.price):   # feed the BAR CLOSE
+                                self._process_brick(b)
+                        self._maybe_square_off()
+                        self._check_circuit_breaker()
+                        self._maybe_auto_roll()
+                        # keep retrying an exit that failed to fill (position still open)
+                        if self.exit_retry_pending and self.position and not self.pending_exit:
+                            self.pending_exit = True
+                            asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
+                    else:
+                        # Market CLOSED: freeze the strategy entirely. No new bricks, no
+                        # exits, no circuit-breaker action — the open position is held
+                        # untouched (carry-forward) until the next session at 09:15 IST.
                         self.ticks_in_bar = 0
-                        for b in self._feed_close(self.price):   # feed the BAR CLOSE
-                            self._process_brick(b)
-                    self._maybe_square_off()
-                    self._check_circuit_breaker()
-                    self._maybe_auto_roll()
-                    # keep retrying an exit that failed to fill (position still open)
-                    if self.exit_retry_pending and self.position and not self.pending_exit:
-                        self.pending_exit = True
-                        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
-                    # periodic crash-recovery snapshot (~every 15s)
+                        if not self._mkt_paused:
+                            self._mkt_paused = True
+                            self._set_alert("Market closed — strategy paused; position held. "
+                                            "No bricks will form until 09:15 IST.", "info")
+                    # periodic crash-recovery snapshot (~every 15s), regardless of market state
                     self.persist_counter += 1
                     if self.persist_counter >= 15:
                         self.persist_counter = 0
@@ -879,6 +903,7 @@ class TradingEngine:
         return {
             "running": self.running,
             "mode": self.mode,
+            "market_open": self._market_open(),
             "feed_mode": self.feed_mode,
             "feed_error": self.feed_error,
             "alert": self.alert,
