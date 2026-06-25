@@ -272,7 +272,7 @@ class TradingEngine:
     async def _cur_price(self):
         if self.feed_mode == "LIVE" and self.broker.connected:
             ltp = await asyncio.to_thread(self.broker.get_ltp)
-            if ltp is not None:
+            if ltp is not None and ltp > 0:
                 return ltp
         return self.price
 
@@ -771,7 +771,7 @@ class TradingEngine:
             await self._auto_reconnect()
             return
         ltp = await asyncio.to_thread(self.broker.get_ltp)
-        if ltp is not None:
+        if ltp is not None and ltp > 0:
             self.prev_price = self.price
             self.price = ltp
             self.feed_error = ""
