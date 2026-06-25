@@ -782,9 +782,12 @@ class TradingEngine:
         if now - self._last_pnl_fetch < 8:
             return
         self._last_pnl_fetch = now
-        pnl = await asyncio.to_thread(self.broker.get_day_pnl)
-        if pnl.get("found"):
-            self.broker_pnl = pnl
+        try:
+            pnl = await asyncio.to_thread(self.broker.get_day_pnl)
+            if pnl.get("found"):
+                self.broker_pnl = pnl
+        except Exception as e:
+            logger.warning("broker pnl refresh failed: %s", e)
 
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close

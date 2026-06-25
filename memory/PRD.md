@@ -1,80 +1,53 @@
-# Renko Algo Trading Bot — PRD
+# Renko Nifty Bot — PRD
 
 ## Original Problem Statement
-Build an algo trading bot for NIFTY Futures that places orders using a Renko-chart strategy on the user's Angel One account (keys added later). Strategy: Renko brick size 50, 1-min timeframe, NIFTY futures (lot size 65), carry-forward positions.
-- Entry: SHORT when 2 consecutive RED bricks form.
-- Exit: if ≤4 reds in the down-run → exit (cover) on the FIRST green brick; if >4 reds → wait for 2 green bricks to exit.
-- Must test with DEMO orders in real time (NO real Angel One orders yet).
-- SEBI compliance: no market orders — place LIMIT orders with a price buffer so they fill; if not filled, re-check & re-place after 5 seconds.
+Algo trading bot that places real orders on the user's Angel One account using a
+Renko strategy. Brick size 50, 1-minute timeframe, NIFTY Future lot (qty 65),
+carry-forward. Entry: short when 2 red bricks form. Exit: <=4 reds → exit on 1st
+green; >4 reds → wait for 2 greens.
 
-## User Choices
-- Simulated price feed (random walk), DEMO orders only, lot size 65, SEBI-safe limit orders with buffer + 5s retry.
+## Product Requirements
+- Real money execution only (no demo/simulation).
+- Broker reconciliation panel on restart for missed fills.
+- Auto-reconnect watchdog for Angel One websocket drops.
+- Order placement routed via external static-IP proxy (Azure VM) for SEBI compliance.
+- Order and rejection log UI.
 
 ## Architecture
-- Backend: FastAPI + in-memory TradingEngine (async loop, 1s tick), MongoDB for trade log. Routes under `/api`.
-- Frontend: React + Tailwind "Control Room" dashboard, polls `/api/state` (1s) and `/api/trades` (3s).
-- Engine: simulated price → simple Renko builder (brick_size step) → strategy state machine → demo LIMIT order executor (buffer + 5s retry).
+- Backend: FastAPI + MongoDB (motor). `server.py` (engine/state machine/API),
+  `angel_broker.py` (SmartAPI wrapper + order proxy routing).
+- Frontend: React + Tailwind. `Dashboard.js`, `RenkoChart.js`.
+- Proxy: Azure VM `tinyproxy` on port 8888 (BasicAuth `algouser:yashgadam`),
+  reachable at `4.188.96.104`. `ANGEL_PROXY_URL` routes ONLY order place/modify/
+  cancel + position fetch; login & market data go direct.
 
-## Implemented (2026-06-21)
-- Simulated NIFTY futures price feed (momentum random walk + mean reversion).
-- Renko brick construction — **Traditional Renko (TradingView-style)**: 1× continuation, 2× reversal, close-based on each bar (default **60s = 1-min**).
-- Strategy state machine: short on 2 reds; exit on 1 green (≤4 reds) or 2 greens (>4 reds).
-- SEBI-safe LIMIT order simulation: SELL=ref−buffer, BUY=ref+buffer; ~25% orders go to 5s RETRY then COMPLETE.
-- **Crash/restart recovery**: engine state (position, bricks, anchor, counters) persisted to Mongo `engine_state` and restored on startup. In-flight order flags cleared (LIVE: must reconcile with broker positions).
-- **Duplicate-order protection**: single async order lock + in-flight state re-validation drops stale/duplicate triggers.
-- **Auto square-off**: monthly expiry = last Thursday; auto-exits open position at 15:20 IST on expiry day and blocks new entries that day; carry-forward all other days. Manual `POST /api/bot/square-off` button too.
-- Trade log, P&L (realized + unrealized), win-rate; expiry/square-off info card; editable strategy + square-off settings.
-- Angel One config form (stores key/client id, stays DEMO — no real orders).
-- Tested: crash recovery, manual square-off (trade recorded w/ exit_reason), duplicate guard, expiry calc all verified.
+## Environments
+- PREVIEW (dev): worked on directly.
+- PRODUCTION: https://renko-nifty-bot.emergent.host (separate deploy env vars).
 
-## Backlog
-- P1: Real Angel One SmartAPI integration (login, LTP feed, order placement) with DEMO↔LIVE toggle; reconcile recovered position against broker on startup.
-- P1: Risk controls — daily max-loss circuit breaker, hard stop-loss, max-trades/day, overnight gap guard.
-- P1: Replace polling with WebSocket/SSE live stream.
-- P2: Partial-fill handling; multi-retry with max attempts + REJECTED state; market-hours/holiday calendar; brokerage/STT in P&L.
-- P2: Split backend into engine.py / routes.py / models.py; Pydantic Trade model.
-- P2: Historical analytics (equity curve, per-day P&L).
+## Implemented (this session — June 2026)
+- ✅ Resolved Azure proxy chain end-to-end: opened NSG port 8888 (Source=Any),
+  removed tinyproxy IP whitelist, added BasicAuth. `_angel_proxies()` injects
+  credentials (URL or ANGEL_PROXY_USER/PASS) → no more 407. Orders egress from
+  Azure static IP `4.188.96.104`.
+- ✅ Fixed production 407: requires `ANGEL_PROXY_URL=http://algouser:yashgadam@4.188.96.104:8888`
+  in the production deploy env var (user updated + redeployed).
+- ✅ SEO: real robots.txt, sitemap.xml, llms.txt, title/meta/OG tags in public/.
+- ✅ Real Daily P&L from Angel One: `get_day_pnl()` reads position book (realised/
+  unrealised), engine refreshes throttled ~8s (`_refresh_broker_pnl`), exposed at
+  `risk.broker_pnl`, shown on dashboard as "Angel One Day P&L (live)" block.
+  Reflects manual-panel + bot fills. Verified live (iteration_3.json, 5/5 backend).
 
-## Implemented (2026-06-24)
-- **Stop-button confirmation**: clicking Stop now opens a confirmation dialog. On confirm, if a position is open it force-exits (square-off, MANUAL_SQUAREOFF, 25-pt forced slippage cap) and then halts; if flat it just stops. Backend `/api/bot/stop` accepts `{square_off: bool}` → returns `{running, squared_off}`. Prevents accidental halts that disable safety logic.
-- **Aggressive re-entry**: entry condition changed from exactly 2 reds (`consec_red == 2`) to `consec_red >= 2`. If the bot (re)starts mid-downtrend with a run already >2 reds, it enters SHORT immediately on the next red instead of waiting for a green reset — so an in-progress downtrend isn't missed (user-requested). `down_run_reds` now seeds from the actual red run so the exit rule (>4 reds → 2 greens) stays correct.
+## Backlog / Next Tasks
+- P2: Dashboard indicator "Order route: Azure proxy ✓ + live outbound IP".
+- P2 (review nits, optional): add `last_synced_at` + STALE state to broker P&L
+  badge; filter `get_day_pnl` by `fut_token` if multiple instruments held;
+  expose top-level `broker.connected` in /api/state.
+- Refactor: `Dashboard.js` (>600 lines) → split into OrderLog / Reconciliation /
+  Controls / RiskWidget components.
 
-## Implemented (2026-06-24) — Real Order Execution + Reconciliation
-- **PAPER ↔ LIVE trade mode** (`engine.mode`, persisted): simple header toggle. LIVE places REAL Angel One orders; guarded so LIVE only activates when broker connected + feed=LIVE, and live order placement only runs when `mode==LIVE AND feed_mode==LIVE AND connected` (SIM feed always uses the simulated paper-fill path → safe). Frontend shows a LIVE confirmation dialog; "Enable LIVE" is disabled with an inline reason until broker connected + feed LIVE.
-- **Real order placement** (`angel_broker.py`): `place_limit_order` (variety NORMAL, NFO, LIMIT, **CARRYFORWARD/NRML**, DAY), `modify_order_price` (re-price working order to escalate buffer), `get_order_status` (orderBook lookup), `cancel_order`, `get_net_position` (position() netqty for selected token). Engine `_live_fill` mirrors the paper escalating-buffer/5s-retry logic against a single broker order id (modify on retry to avoid double-fill); unfilled orders are cancelled. `_paper_fill` extracted for SIM/paper.
-- **Broker reconciliation on restart** (`/api/bot/reconcile`, `/api/bot/reconcile/resolve`): compares bot position vs Angel One net qty → 3 states: GOOD ("everything is good"), ENTRY_MISSED ("short trade missed" → "take trade again"/reenter), EXIT_MISSED ("exit missed" → "exit trade again"/reexit). UI "Broker Reconciliation" widget with Check Angel One button + action buttons.
-- **Tested** (iteration_2.json): 11/12 backend passed (1 skipped — random-walk signal timing), all frontend flows passed. SAFETY: real-money LIVE+LIVE order fill path is implemented but NOT validated against a real exchange fill (would place real orders; market closed). Email alerts for missed fills: SKIPPED per user.
-
-## Implemented (2026-06-24) — Immediate entry on Start
-- **Enter-on-Start**: clicking Start now checks the current brick run; if flat and already in a **2+ red down-run** (and entries not blocked), it places a SHORT **immediately at market** (`reason=START_IMMEDIATE`) instead of waiting for the next brick to print. Works in PAPER (simulated) and LIVE (real order). Implemented as `_maybe_enter_on_start()` fired from `/api/bot/start`. Verified via curl: starting at consec_red=3 opened a SHORT instantly.
-
-## Implemented (2026-06-24) — LIVE-ONLY (real money) conversion
-- **Removed SIM feed + PAPER orders entirely.** App is now LIVE-only: always real Angel One LTP, always REAL CARRYFORWARD LIMIT orders. `mode` and `feed_mode` are forced to "LIVE" everywhere (init, load_state, endpoints). Deleted `_gen_price` and `_paper_fill`. `_execute_order` now always uses `_live_fill` and rejects (with alert) if the broker is disconnected. `/bot/trade-mode` and `/feed/mode` neutralized to always return LIVE.
-- **Auto-reconnect watchdog**: `_auto_reconnect()` (throttled ~20s) re-logs into Angel One automatically when the session drops while running; `_next_price` calls it instead of ever simulating.
-- **Limit-order buffer/cap raised 5→20 pts** (`buffer_points=20`, `max_slippage=20`; forced-exit cap stays 25). Settings endpoint now persists to Mongo so changes survive restarts.
-- **Frontend**: removed PAPER/LIVE toggle, SIM/LIVE feed toggle, and the LIVE-enable dialog. Header now shows static "LIVE · REAL MONEY" + "LIVE DATA/Disconnected" badges. Added a **Start confirmation dialog** (warns real money + immediate entry). Kept all safety controls (Stop-confirm + force square-off, ₹10k breaker, expiry square-off, reconciliation).
-- **Testing note**: verified via screenshots + curl (UI renders, toggles gone, Start dialog works, backend LIVE + connected + buffer=20). Real order PLACEMENT was NOT executed in testing (real money + market open) — must be validated by user with a supervised 1-lot live trade.
-
-## Implemented (2026-06-24) — Exit boundary + Order Log
-- **Exit rule changed to Option B**: red count (incl. the 2 entry reds) of **≥ 4 → wait for 2 greens**; **< 4 (i.e. 2–3) → exit on 1st green**. One-line change `down_run_reds > max_red_single_green` → `>=`.
-- **Persistent Order Log**: every terminal order (COMPLETE/REJECTED) is saved to Mongo `order_log` with the **exact Angel One rejection reason** in `note`. New `GET /api/orders/log` endpoint + an "Order Log" UI widget (Time/Side/Type/Status/Limit/Fill/Reason). Rejection alerts now surface Angel's real error text. Settings endpoint persists; `/bot/reset` also clears order_log.
-- **Tick-size fix** (earlier this session): all order prices rounded to nearest 0.05 (`round_to_tick`) — fixes the most common Angel One LIMIT rejection.
-
-## Implemented (2026-06-24) — LTP rounding
-- **Live LTP rounded to whole number** in `angel_broker.get_ltp` (e.g. 23890.30 → 23890). Cleaner brick levels and tick-aligned order prices.
-
-## Implemented (2026-06-24) — Smarter enter-on-Start (Option A)
-- **Enter-on-Start now mirrors the exit rule** (only on Start, not during live running). It scans the most recent red down-run + trailing green pullback: down-run of 2–3 reds is short-biased unless 1 green printed; 4+ reds short-biased unless 2 greens printed. If still short-biased and flat → enters SHORT immediately, carrying the already-printed greens so the exit rule continues correctly. Fixes "started late into a 5-red + 1-green downtrend → no trade". Verified across 10 scenarios via standalone test.
-
-## Implemented (2026-06-24) — Manual test orders + IP-rejection diagnosis
-- **ROOT CAUSE of all order rejections found**: Angel One SEBI rule — order placement (Place/Modify/Cancel) only works from a **registered static IP**. Login & market data work without it. Preview egress = 104.198.214.223 (not whitelisted); production egress = 4.188.96.104 (user registered it on smartapi.angelone.in). Orders will succeed from PRODUCTION only. Not a code bug — cannot be changed in app code (Angel validates real socket IP).
-- **Manual Order panel** added (`POST /api/orders/manual` {side} + UI Buy/Sell 1-lot buttons) to place a one-off REAL LIMIT order near LTP for verification, independent of the strategy. Result + exact reason logged to Order Log.
-- Test BUY from preview correctly rejected with the IP error (pipeline verified end-to-end).
-
-## Implemented (2026-06-24) — Static-IP proxy for orders (Azure)
-- **Order placement can route through a static-IP proxy** via `ANGEL_PROXY_URL` (set to `http://4.188.96.104:8888` — user's Azure VM). Solves Angel One's SEBI static-IP rule when hosted on Emergent's shared egress (34.9.233.22, which is already taken by another app on Angel).
-- **Critical design**: proxy is applied ONLY to order place/modify/cancel (via `_order_proxy()` contextmanager in angel_broker.py). Login + LTP + history + orderBook + position stay DIRECT, so the broker connection/live-data never depend on the proxy being up. (Earlier a global proxy on SmartConnect broke the whole connection — fixed.)
-- User must: run tinyproxy on Azure VM port 8888 (Allow 34.9.233.22), fix NSG (source port `*`, dest port 8888), confirm VM outbound IP = 4.188.96.104 (whitelisted on app RHR6a8ea), then redeploy.
-
-## Next Tasks
-- Await user's Angel One API credentials, then integrate SmartAPI (keep DEMO default).
+## Critical Notes
+- LIVE REAL MONEY ONLY. Never place/modify/cancel orders or Start the bot without
+  explicit user consent.
+- Production env vars are managed separately from preview .env; code fixes need a
+  redeploy to reach production.
