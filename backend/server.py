@@ -700,7 +700,9 @@ class TradingEngine:
         asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, reason))
 
     def _maybe_auto_roll(self):
-        """Once the active contract has expired, auto-switch to the next month."""
+        """Switch to the next-month contract once the active one has expired — including
+        ON expiry day after the square-off cutoff, so the bot can resume trading the new
+        contract the same session instead of staying stuck on the expired one."""
         if not self.settings.get("auto_roll", True):
             return
         if not self.broker.connected or not self.broker.fut_expiry:
@@ -711,7 +713,11 @@ class TradingEngine:
             exp = date.fromisoformat(self.broker.fut_expiry)
         except Exception:
             return
-        if exp < datetime.now(IST).date():
+        _, _, _, is_today, past_cut = self._expiry_status()
+        today = datetime.now(IST).date()
+        # Roll if the contract already expired (next day) OR it expires today and we're
+        # past the square-off cutoff (position is now flat after the expiry square-off).
+        if exp < today or (exp == today and past_cut):
             res = self.broker.roll_to_next()
             if res.get("ok"):
                 self.settings["instrument_token"] = res["token"]

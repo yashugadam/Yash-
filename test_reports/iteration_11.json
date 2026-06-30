@@ -1,0 +1,30 @@
+{
+  "summary": "Verified expiry-day auto-roll fix and roll_to_next() correctness with 16 new in-process pytest cases (NO real orders, broker methods mocked, broker.futures seeded as plain dicts). 16/16 new tests PASS. Coverage: (1) roll_to_next() picks the strictly-later expiry NIFTY FUTIDX contract — not the current/expiring one; ignores other underlyings (BANKNIFTY/RELIANCE), ignores already-expired stale entries, returns ok=False with 'no next contract found' when only the current contract exists, and 'no futures cache' when cache is empty. (2) _maybe_auto_roll on EXPIRY DAY after cutoff while flat -> calls broker.roll_to_next, updates settings['instrument_token'], resets anchor/direction/bricks/brick_seq/consec_red/consec_green/down_run_reds, clears squared_off_date and sets an 'Auto-rolled to next contract' alert; also rolls correctly when exp<today (day after expiry). (3) Guarded paths confirmed: NEVER rolls when engine.position is set, pending_exit=True, pending_entry=True, expiry day BEFORE cutoff, or auto_roll=False. (4) _entries_blocked() returns True on expiry day past cutoff OR when breaker_tripped; returns False after roll (next-month expiry, is_today=False). (5) Regression: GET /api/state -> 200 with all legacy keys (running, price, settings, bricks, metrics, risk, expiry, angel, orders, feed_mode, market_open) intact.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "n/a (pre-existing test file)", "issue": "tests/test_feature_batch.py has 3 stale assertions unrelated to this change: test_set_paper_mode expects mode='PAPER' but app is LIVE-only; test_reconcile_good_when_flat_and_connected & test_resolve_reexit_broker_flat assume broker is flat, but the live preview Angel session actually shows netqty=-65 (real open short) so reconcile correctly returns EXIT_MISSED. Recommend updating these stale tests or marking them environment-dependent."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_expiry_auto_roll.py",
+    "/app/test_reports/pytest/pytest_expiry_auto_roll.xml"
+  ],
+  "action_items": [
+    "Refresh tests/test_feature_batch.py stale cases (PAPER mode removed, live preview holds an open short making reconcile=EXIT_MISSED) — unrelated to this fix but worth a cleanup pass."
+  ],
+  "critical_code_review_comments": [
+    "_maybe_auto_roll calls asyncio.create_task(self._persist_state()) and asyncio.create_task(self._autoload_after_roll()) directly. Since _maybe_auto_roll is a sync method invoked from run_loop (which runs inside an asyncio task), this works in production — but it ties the method to an event-loop context. Consider documenting this OR making the method async to remove implicit context coupling (also makes the sync path easier to unit-test).",
+    "angel_broker.roll_to_next handles missing fut_expiry by defaulting cur_exp=date.today(), which means if fut_expiry is empty AND the only available NIFTY futures are dated today, it would pick none (no f.expiry > today). This is the conservative/correct behaviour for today's case but is silently dependent on broker state; an explicit guard + error string ('no current expiry set') would be clearer.",
+    "server.py is now ~1250 lines — still exceeds the 700-line guideline; split into engine.py + routes.py modules for maintainability (called out in prior iterations too)."
+  ],
+  "updated_files": ["/app/backend/tests/test_expiry_auto_roll.py"],
+  "success_rate": {"backend": "100% (16/16 new tests + 81/84 full backend suite; 3 pre-existing stale failures unrelated to this change)", "frontend": "n/a (backend-only request)"},
+  "test_credentials": "n/a — broker login mocked, no real auth used.",
+  "seed_data_creation": "broker.futures was seeded in-process per test with plain dicts (NIFTY FUTIDX today/+30d/+60d plus noise BANKNIFTY & RELIANCE). NO database writes. NO real orders placed. broker.roll_to_next / _persist_state / _autoload_after_roll mocked where needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New test file: /app/backend/tests/test_expiry_auto_roll.py (16 tests, all pass). Live preview Angel One session is active and currently shows a real broker netqty=-65 — be aware reconcile state is EXIT_MISSED, not GOOD. Tests guard against running the bot or placing real orders. test_feature_batch.py has 3 stale failures that pre-existed this iteration.",
+  "rca of the issue": "Original bug: on expiry day after 3:20pm square-off, (a) _maybe_auto_roll only rolled when exp<today (i.e. the day AFTER), so it stayed on the expired contract for the rest of expiry day; (b) angel_broker.roll_to_next filtered `f.expiry >= today` and returned the SAME (expiring) contract -> 'already on current'. Fix verified: _maybe_auto_roll now rolls when `exp<today OR (exp==today AND past_cut)` AND only when flat (no position / no pending entry|exit); roll_to_next now filters `f.expiry > cur_exp` (strictly later) so the expiring contract is skipped. After roll the chart state is fully reset (anchor/bricks/runs cleared, squared_off_date=None), entries are re-enabled because is_today=False on the new contract, and an alert is raised. Mid-trade guard verified: roll does NOT execute when position is open or any order is pending."
+}

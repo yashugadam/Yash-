@@ -205,20 +205,21 @@ class AngelBroker:
         return {"ok": False, "error": "Instrument not found"}
 
     def roll_to_next(self):
-        """Switch to the nearest non-expired contract of the same underlying (auto-roll)."""
+        """Switch to the nearest contract of the same underlying whose expiry is STRICTLY
+        LATER than the current one (skips the expiring/current contract on expiry day)."""
         if not self.futures:
             return {"ok": False, "error": "no futures cache"}
-        today = date.today()
+        try:
+            cur_exp = date.fromisoformat(self.fut_expiry) if self.fut_expiry else date.today()
+        except Exception:
+            cur_exp = date.today()
         cands = sorted(
             [f for f in self.futures if f["name"] == self.fut_name
-             and f["type"] == self.fut_type and f["expiry"] >= today],
+             and f["type"] == self.fut_type and f["expiry"] > cur_exp],
             key=lambda f: f["expiry"])
         if not cands:
             return {"ok": False, "error": "no next contract found"}
-        nxt = cands[0]
-        if nxt["token"] == self.fut_token:
-            return {"ok": False, "error": "already on current contract"}
-        return self.select_instrument(nxt["token"])
+        return self.select_instrument(cands[0]["token"])
 
     def relogin(self):
         """Re-establish the session (e.g. after token expiry) using stored creds."""
