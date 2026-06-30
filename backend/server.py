@@ -141,6 +141,7 @@ class TradingEngine:
         self.broker_pnl = {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
         self._last_pnl_fetch = 0.0
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
+        self._open_recon_date: Optional[str] = None     # IST date we already ran the market-open safety reconcile
         self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
         self._last_reject_note = ""                    # last broker rejection reason (for alerts)
@@ -705,6 +706,40 @@ class TradingEngine:
                     return
         await self._maybe_enter_on_start()
 
+    async def _market_open_reconcile(self):
+        """Once per day, the first time the market is open AND Angel One is connected,
+        auto-reconcile: if the broker holds a position the bot isn't tracking (e.g. a manual
+        short carried overnight), surface it for adoption so the bot never stacks a new short
+        on top of it. Runs only while the bot is flat; if already managing a position, just
+        marks the day done. Replaces the old continuous 2-min polling with a single safe check."""
+        today = datetime.now(IST).date().isoformat()
+        if self._open_recon_date == today:
+            return
+        if not self.broker.connected:
+            return
+        if self.position is not None or self.pending_adoption is not None:
+            self._open_recon_date = today
+            return
+        np = await asyncio.to_thread(self.broker.get_net_position)
+        if not np.get("found"):
+            return  # broker read failed — retry next tick, don't burn today's check
+        self._open_recon_date = today
+        qty = int(np.get("netqty") or 0)
+        if qty < 0:
+            self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
+                                     "netqty": qty, "side": "SHORT", "declined": False}
+            self._set_alert(f"Market open safety check: found an existing SHORT of {abs(qty)} qty on "
+                            f"Angel One (manual/carry-forward). Adopt it so the bot manages the exit — "
+                            f"new entries are paused until you decide.", "warning")
+            await self._persist_state()
+        elif qty > 0:
+            self.pending_adoption = {"qty": qty, "avgprice": np.get("avgprice"),
+                                     "netqty": qty, "side": "LONG", "declined": False}
+            self._set_alert(f"Market open safety check: a LONG position ({qty} qty) exists on Angel One — "
+                            f"outside the short-only strategy. Bot will NOT trade until it's resolved.", "error")
+            await self._persist_state()
+
+
     async def adopt_position(self, confirm: bool):
         """User's decision on the existing Angel One position found at Start."""
         pa = self.pending_adoption
@@ -965,6 +1000,10 @@ class TradingEngine:
                             if self._disc_flagged:
                                 self._disc_flagged = False
                                 self._set_alert("Angel One reconnected — strategy resumed.", "info")
+                            # One-time daily safety reconcile at market open: adopt any
+                            # untracked broker position (manual/carry-forward) so the bot
+                            # never stacks a new short on top of it.
+                            await self._market_open_reconcile()
                             self.ticks_in_bar += 1
                             self._update_unrealized()
                             if self.ticks_in_bar >= self.settings["bar_seconds"]:

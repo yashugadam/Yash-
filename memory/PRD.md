@@ -48,10 +48,12 @@ green; >4 reds → wait for 2 greens.
 
 ## Critical Notes
 - Manual trade adoption (June 2026): the every-2-min running-mode auto-polling was
-  REMOVED at user request (they rarely place manual trades). Adoption now happens
-  ONLY when user clicks broker reconciliation ("Check Angel One" → "Sync to broker"),
-  which adopts any open Angel One position into the bot (reconcile_resolve "accept").
-  On-Start reconcile/adopt (`_on_start`) still active.
+  REMOVED. Replaced with a ONE-TIME-PER-DAY market-open safety reconcile
+  (`_market_open_reconcile`, called in run_loop once market is open + connected):
+  if the broker holds an untracked position (manual/carry-forward) while the bot is
+  flat, it sets `pending_adoption` (blocks new entries, no stacking) and prompts the
+  user to adopt. Keyed by IST date (`_open_recon_date`); failed broker reads retry.
+  Manual "Sync to broker" reconcile + on-Start adopt (`_on_start`) still active.
 - LIVE REAL MONEY ONLY. Never place/modify/cancel orders or Start the bot without
   explicit user consent.
 - Production env vars are managed separately from preview .env; code fixes need a
