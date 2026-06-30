@@ -1,0 +1,41 @@
+{
+  "summary": "Validated reconcile_resolve('accept') (Sync to broker) end-to-end: when broker is FLAT it clears stale engine.position; when broker holds a position it ADOPTS it as engine.position (RECONCILE_ADOPT) with correct qty/avgprice; when get_net_position not found it returns ok:False with no state change. Subsequent reconcile() returns GOOD in both sync paths — proving the warning genuinely clears and won't recompute. Verified reconcile() state mapping (GOOD/ENTRY_MISSED/EXIT_MISSED), reenter/reexit guards, default square_off_time = '15:20' on a fresh TradingEngine, and that GET /api/state returns all required keys. Frontend: 'Broker Reconciliation' widget renders, Check Angel One returns EXIT_MISSED (real -65 short on live broker), reconcile-accept-button-2 testid is present with label 'SYNC TO BROKER' — verified without clicking (no live order risk).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/bot/reconcile/resolve (test_feature_batch.TestReconcileResolve::test_resolve_accept)", "issue": "Pre-existing stale test in test_feature_batch.py calls real broker.get_net_position via API and gets rate-limited by Angel ('Access denied because of exceeding access rate'). The new 'accept' path now correctly calls get_net_position — the old test predates the new behaviour. Recommend either mocking the broker in that test or removing it (covered by new test_reconcile_sync.py)."},
+      {"endpoint": "/api/bot/reconcile (test_feature_batch.TestReconcile::test_reconcile_good_when_flat_and_connected)", "issue": "Same as above — hits live broker, rate-limited. Not a regression of this change."},
+      {"endpoint": "/api/bot/trade-mode (test_feature_batch.TestTradeMode::test_set_paper_mode)", "issue": "Pre-existing stale test — app is LIVE-only since prior iterations; the test still expects 'PAPER' mode."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_reconcile_sync.py",
+    "/app/test_reports/pytest/pytest_reconcile_sync.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Update or delete the 3 stale tests in test_feature_batch.py listed above — they rely on (a) PAPER mode (removed) and (b) unmocked live Angel broker calls (now rate-limited). New test_reconcile_sync.py covers reconcile + accept comprehensively with mocks.",
+    "(Optional cosmetic) Note that the running engine still has square_off_time='15:00' persisted from old DB doc; the code default is now '15:20' as required. To apply to current preview, post /api/settings {square_off_time:'15:20'} or call /api/bot/reset."
+  ],
+  "critical_code_review_comments": [
+    "reconcile_resolve('accept') correctly clears pending_entry/pending_exit/exit_retry_pending and resets _exit_retry_count — important because the bug being fixed was the warning recomputing. Without this reset the retry loop would still be active.",
+    "Adopt path uses 'side: SHORT' unconditionally (entry_order_id='RECONCILE_ADOPT'). If Angel One ever returns netqty > 0 (a long carry on the same symbol), the bot would incorrectly mark it as SHORT. Consider deriving side from sign(netqty). Non-blocking — this bot is short-only by strategy.",
+    "server.py still ~1300 lines — past the 700-line guideline. Splitting suggested in prior iterations still applies.",
+    "FastAPI @app.on_event('startup'/'shutdown') deprecation warnings continue to surface — move to lifespan handlers."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_reconcile_sync.py (new)"
+  ],
+  "success_rate": {"backend": "100% on new suite (11/11); 104/107 on full suite — 3 pre-existing live-broker tests in test_feature_batch.py", "frontend": "100% (widget renders, sync-to-broker label/testid verified, no clicks executed)"},
+  "test_credentials": "n/a",
+  "seed_data_creation": "In-process unit tests: monkeypatched engine.broker.get_net_position with deterministic dicts ({found:True, netqty:0|-65, avgprice:24000}) and stubbed _persist_state to a no-op. No DB writes. NO real orders placed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_reconcile_sync.py is the canonical regression suite for reconcile + accept. Uses isolated event loop per test (asyncio.new_event_loop) so it co-exists with other pytest_asyncio tests. Live Angel One broker rate-limits (~1 call/sec on position()) — any future integration test that hits the real broker must throttle / mock. The 'SYNC TO BROKER' button was visible in the live UI with state.exit_missed (real -65 short) — clicking it would have called the real /api/bot/reconcile/resolve with action='accept' and adopted the live short into the bot. Intentionally NOT clicked per agent_to_agent_context_note.",
+  "rca of the issue": "Original bug: reconcile_resolve('accept') was a no-op that returned a success message but did not mutate engine.position. The next reconcile() call therefore recomputed the same broker-vs-bot diff and re-flagged the same EXIT_MISSED warning. FIX VERIFIED: 'accept' now (1) reads broker.get_net_position, (2) clears pending flags + exit_retry_count, (3) sets engine.position=None if broker flat OR engine.position=SHORT(qty,avgprice,'RECONCILE_ADOPT') if broker holds, and (4) persists. Subsequent reconcile() returns GOOD. All four branches covered by unit tests."
+}

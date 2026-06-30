@@ -489,8 +489,9 @@ export default function Dashboard() {
                   </button>
                   <button onClick={() => resolveReconcile("accept")} disabled={reconBusy}
                     data-testid="reconcile-accept-button-2"
+                    title="Accept Angel One as correct and sync the bot to match (clears the warning)"
                     className="font-mono text-[11px] uppercase tracking-wider border border-slate-300 px-3 py-1.5 hover:bg-slate-50 disabled:opacity-40">
-                    Ignore
+                    Sync to broker
                   </button>
                 </div>
               </div>

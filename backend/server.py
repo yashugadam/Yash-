@@ -82,7 +82,7 @@ class TradingEngine:
             "max_red_single_green": 4,     # > this reds => need 2 greens to exit
             "greens_to_exit_extended": 2,
             "tick_interval": 1.0,
-            "square_off_time": "15:00",    # IST: auto square-off time on expiry day
+            "square_off_time": "15:20",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
             "auto_roll": True,             # auto-switch to next month once current contract expires
             "rollover_position": True,     # at expiry square-off, immediately re-open the short on next month
@@ -471,7 +471,29 @@ class TradingEngine:
             await self._persist_state()
             return {"ok": True, "message": "Exit order placed to flatten the broker position."}
         if action == "accept":
-            return {"ok": True, "message": "Marked as reconciled."}
+            # Accept Angel One as the source of truth and SYNC the bot to it, so the
+            # mismatch is genuinely resolved (otherwise the warning just recomputes).
+            np = await asyncio.to_thread(self.broker.get_net_position)
+            if not np.get("found"):
+                return {"ok": False, "message": np.get("error") or "Could not read Angel One positions."}
+            qty = abs(int(np.get("netqty", 0)))
+            self.pending_entry = self.pending_exit = False
+            self.exit_retry_pending = False
+            self._exit_retry_count = 0
+            if qty == 0:
+                # broker is flat -> clear any stale bot position (broker already closed it)
+                self.position = None
+                await self._persist_state()
+                return {"ok": True, "message": "Synced — bot set to FLAT to match Angel One "
+                        "(the broker already closed the position)."}
+            # broker holds a position -> adopt it so the bot manages/exits it per strategy
+            self.position = {
+                "side": "SHORT", "qty": qty, "entry_price": np.get("avgprice") or self.price,
+                "entry_time": now_iso(), "entry_order_id": "RECONCILE_ADOPT",
+                "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
+            }
+            await self._persist_state()
+            return {"ok": True, "message": f"Synced — adopted Angel One's open position ({qty} qty) into the bot."}
         return {"ok": False, "message": "Unknown action."}
 
     async def manual_order(self, side, qty=None):
