@@ -958,9 +958,14 @@ class TradingEngine:
             logger.info("Auto-reconnected Angel One (session had dropped)")
 
     async def _refresh_broker_pnl(self):
-        """Pull real day P&L from Angel One (throttled ~8s). Runs whether or not the
-        bot is 'running', so manual-panel trades are reflected too."""
+        """Pull real day P&L from Angel One (throttled ~8s), but ONLY during market hours
+        (Mon–Fri 09:15–15:30 IST). Angel One often returns stale/garbage day P&L outside
+        the session, so after the close we FREEZE the last in-hours value instead of
+        overwriting it with bad data. Runs whether or not the bot is 'running' so manual-
+        panel trades are reflected too."""
         if not self.broker.connected:
+            return
+        if not self._market_open():
             return
         now = time.time()
         if now - self._last_pnl_fetch < 8:

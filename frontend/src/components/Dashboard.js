@@ -652,8 +652,10 @@ export default function Dashboard() {
             {state.risk.broker_pnl && (
               <div className="mt-3 pt-3 border-t border-slate-100" data-testid="broker-pnl-block">
                 <p className="font-mono text-[10px] uppercase tracking-widest text-slate-400 flex items-center gap-1">
-                  Angel One Day P&L (live)
-                  {state.risk.broker_pnl.found
+                  Angel One Day P&L {state.market_open ? "(live)" : "(at close)"}
+                  {!state.market_open
+                    ? <span className="bg-amber-100 text-amber-700 px-1.5 py-0.5 text-[9px]">FROZEN</span>
+                    : state.risk.broker_pnl.found
                     ? <span className="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 text-[9px]">SYNCED</span>
                     : <span className="bg-slate-100 text-slate-500 px-1.5 py-0.5 text-[9px]">—</span>}
                 </p>
@@ -671,7 +673,7 @@ export default function Dashboard() {
                     <p className={`font-mono text-sm font-bold ${pnlClass(state.risk.broker_pnl.total)}`} data-testid="broker-total-pnl">{sign(state.risk.broker_pnl.total)}{fmt(state.risk.broker_pnl.total)}</p>
                   </div>
                 </div>
-                <p className="font-mono text-[9px] text-slate-400 mt-1">Real booked P&L from your Angel One account — includes manual orders.</p>
+                <p className="font-mono text-[9px] text-slate-400 mt-1">{state.market_open ? "Real booked P&L from your Angel One account — includes manual orders." : "Market closed — showing last value from market hours (Angel One sends unreliable data after close)."}</p>
               </div>
             )}
             {/* loss progress bar */}
