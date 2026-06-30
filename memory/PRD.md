@@ -47,6 +47,11 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
+- Manual trade adoption (June 2026): the every-2-min running-mode auto-polling was
+  REMOVED at user request (they rarely place manual trades). Adoption now happens
+  ONLY when user clicks broker reconciliation ("Check Angel One" → "Sync to broker"),
+  which adopts any open Angel One position into the bot (reconcile_resolve "accept").
+  On-Start reconcile/adopt (`_on_start`) still active.
 - LIVE REAL MONEY ONLY. Never place/modify/cancel orders or Start the bot without
   explicit user consent.
 - Production env vars are managed separately from preview .env; code fixes need a
