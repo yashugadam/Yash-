@@ -1,0 +1,28 @@
+{
+  "summary": "Frontend regression for the 'Market closed toast spam' fix. Loaded the dashboard at the preview URL, observed 16 consecutive /api/state polls over ~16s, and confirmed ZERO toast notifications were emitted (initial toasts:0, no market-related toasts at any point). Header market-badge renders 'Mkt Closed'. All required widgets render (Renko Chart, Trade Log, Order Log, Broker Reconciliation, Performance, Open Position, Expiry & Square-off, Risk, Strategy). Order Log shows the amber closed-note (data-testid=order-log-closed-note: 'Market closed - bot is idle, no new orders are being placed. Rows below are past history.') with dated IST timestamp '30 Jun, 04:27:17 pm', and Clear button (data-testid=clear-order-log-button) is visible since one row exists. Broker Reconciliation widget renders with 'Check Angel One' button - no mismatch displayed in preview so reconcile-accept-button(-2) are intentionally absent (no live click attempted per agent_to_agent_context_note). Expiry & Square-off shows rollover description ('rolls AND re-opens the short on next month (position rollover)') and Strategy panel exposes setting-rollover_position toggle. Backend regression: GET /api/state returns 200 with market_open + all legacy keys (alert, angel, bricks, expiry, feed_mode, metrics, mode, orders, pending_entry/exit, position, price, risk, running, settings, etc.). Zero console errors, zero page errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_14.json"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Toast-spam fix is correctly implemented in Dashboard.js: lastAlertId useRef (line 40) is declared OUTSIDE the setState updater, the dedupe check (data.alert.id !== lastAlertId.current) sets the ref BEFORE calling toast[...], and the routine market-open/close regex (/^Market (closed|open)/i) suppresses both routine status messages while still allowing error/warning alerts to surface. This correctly prevents the previously observed StrictMode-induced double-fire and the closed-market stacking spam.",
+    "Server.py is still ~1300 lines (>700 guideline) and FastAPI startup/shutdown deprecation warnings remain - carried over from prior iterations, not introduced by this fix."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (GET /api/state 200 with all expected keys incl. market_open)", "frontend": "100% (no console errors, no toast spam over 16 polls, all widgets render, all required testids present)"},
+  "test_credentials": "n/a (no app auth; live Angel One already connected in preview)",
+  "seed_data_creation": "None. Read-only UI smoke; bot left STOPPED per agent_to_agent_context_note. No orders/clicks on reexit/reenter/square-off/BUY/SELL.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Toast-spam regression covered. To reproduce the original bug environment (running bot + market closed), backend would need to emit alerts with msg starting with 'Market closed' and a stable id - the frontend now silently advances lastAlertId.current without toasting; any non-routine alert (disconnect, exit_rejected, rollover, reconcile) WILL still toast and is deduped by id. Use the playwright pattern in this iteration's run (count_toasts via [data-sonner-toast] selectors + 2s polling for ~16s) for future toast-stability checks.",
+  "rca of the issue": "Original bug: when bot was running and market closed, /api/state polling (every ~1s) returned the same 'Market closed - strategy paused; position held' alert payload repeatedly; the Dashboard's toast call was inside the setState updater function which (a) executed twice under React StrictMode and (b) had no dedupe, so each poll stacked a new toast. FIX VERIFIED: (1) Toast logic moved OUT of setState updater into the same async poll() body; (2) lastAlertId useRef compares incoming data.alert.id and short-circuits duplicates; (3) regex /^Market (closed|open)/i suppresses routine market-status messages entirely - market state is conveyed via the persistent 'Mkt Closed/Mkt Open' header badge instead. Confirmed in preview: 16 state polls -> 0 toasts."
+}

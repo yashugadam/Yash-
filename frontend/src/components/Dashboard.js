@@ -37,6 +37,7 @@ export default function Dashboard() {
   const [trades, setTrades] = useState([]);
   const [form, setForm] = useState(null);
   const prevPrice = useRef(null);
+  const lastAlertId = useRef(null);
   const [flash, setFlash] = useState("");
   const [instQuery, setInstQuery] = useState("");
   const [instResults, setInstResults] = useState([]);
@@ -72,12 +73,19 @@ export default function Dashboard() {
           setFlash(data.price > old.price ? "flash-green" : "flash-red");
           setTimeout(() => setFlash(""), 600);
         }
-        if (data.alert && (!old || !old.alert || old.alert.id !== data.alert.id)) {
-          const lvl = data.alert.level === "error" ? "error" : data.alert.level === "warning" ? "warning" : "info";
-          toast[lvl](data.alert.msg, { duration: 8000 });
-        }
         return data;
       });
+      // Toast alerts deduped by id (outside the state updater so it can't double-fire).
+      // Routine market open/close status is shown via the badge — never toasted.
+      if (data.alert && data.alert.id !== lastAlertId.current) {
+        lastAlertId.current = data.alert.id;
+        const msg = data.alert.msg || "";
+        const routine = /^Market (closed|open)/i.test(msg);
+        if (!routine) {
+          const lvl = data.alert.level === "error" ? "error" : data.alert.level === "warning" ? "warning" : "info";
+          toast[lvl](msg, { duration: 8000 });
+        }
+      }
       if (!form) setForm(data.settings);
     } catch (e) { console.debug("poll failed (transient):", e?.message); }
   }, [form]);
