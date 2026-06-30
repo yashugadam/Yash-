@@ -85,6 +85,7 @@ class TradingEngine:
             "square_off_time": "15:00",    # IST: auto square-off time on expiry day
             "auto_square_off": True,
             "auto_roll": True,             # auto-switch to next month once current contract expires
+            "rollover_position": True,     # at expiry square-off, immediately re-open the short on next month
             "daily_max_loss": 10000,       # ₹: auto-stop the bot if day P&L falls to -this
             "circuit_breaker_enabled": True,
         }
@@ -126,6 +127,7 @@ class TradingEngine:
         # safety: duplicate-order protection, expiry square-off, crash recovery
         self.order_lock = asyncio.Lock()
         self.squared_off_date: Optional[str] = None   # date (IST) we already squared off / blocked entries
+        self._rollover_armed = False                   # set at expiry square-off to re-short next month
         self.persist_counter = 0
         # risk: daily max-loss circuit breaker
         self.day_key: Optional[str] = None            # IST date the day P&L belongs to
@@ -687,6 +689,9 @@ class TradingEngine:
         if is_today and past_cut and self.squared_off_date != str(today):
             if self.position and not self.pending_exit:
                 self.squared_off_date = str(today)
+                # arm true position-rollover: re-open the short on next month after exit fills
+                if self.settings.get("rollover_position", True) and self.settings.get("auto_roll", True):
+                    self._rollover_armed = True
                 logger.warning("EXPIRY square-off triggered at %s IST", self.settings["square_off_time"])
                 self._force_exit("EXPIRY_SQUAREOFF")
             elif self.position is None and not self.pending_exit:
@@ -734,6 +739,27 @@ class TradingEngine:
 
     async def _autoload_after_roll(self):
         await self.load_history(days=5)
+        # True position rollover: if we squared off an OPEN short at expiry, immediately
+        # re-open the short on the just-rolled next-month contract (carry across expiry).
+        if self._rollover_armed:
+            self._rollover_armed = False
+            await self._rollover_enter()
+
+    async def _rollover_enter(self):
+        """Open a fresh SHORT on the newly-rolled next-month contract right after the
+        expiry square-off — independent of a brick signal (expiry position rollover)."""
+        if self.position or self.pending_entry or not self.broker.connected:
+            return
+        if not self._market_open():
+            self._set_alert("Expiry rollover skipped — market closed; will resume next session.", "warning")
+            return
+        # treat like a standard 2-red short so the exit logic behaves normally
+        self.consec_red = self.down_run_reds = 2
+        self.consec_green = 0
+        self.pending_entry = True
+        cur = await self._cur_price()
+        self._set_alert(f"Expiry rollover — opening new SHORT on {self.broker.fut_symbol}.", "info")
+        await self._execute_order("SELL", "ENTRY", cur, -1, "EXPIRY_ROLLOVER")
 
     # -------- crash / restart recovery --------
     def _state_doc(self):
@@ -937,6 +963,7 @@ class TradingEngine:
         self.pending_entry = self.pending_exit = False
         self.exit_retry_pending = False
         self._exit_retry_count = 0
+        self._rollover_armed = False
         self.forced_exit_pending = False
         self.alert = None
         self.squared_off_date = None
@@ -1015,6 +1042,7 @@ class SettingsUpdate(BaseModel):
     square_off_time: Optional[str] = None
     auto_square_off: Optional[bool] = None
     auto_roll: Optional[bool] = None
+    rollover_position: Optional[bool] = None
     daily_max_loss: Optional[float] = Field(None, ge=0, le=100_000_000)
     circuit_breaker_enabled: Optional[bool] = None
 

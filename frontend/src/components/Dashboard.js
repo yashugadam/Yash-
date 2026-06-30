@@ -169,6 +169,7 @@ export default function Dashboard() {
       max_red_single_green: Number(form.max_red_single_green),
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
       daily_max_loss: Number(form.daily_max_loss),
+      rollover_position: !!form.rollover_position,
     });
     toast.success("Strategy parameters updated");
     poll();
@@ -573,9 +574,9 @@ export default function Dashboard() {
               <div><p className="font-mono text-[10px] uppercase text-slate-400">Auto</p><p className={`font-mono text-sm font-semibold ${state.expiry.auto_square_off ? "text-emerald-600" : "text-slate-400"}`}>{state.expiry.auto_square_off ? "ON" : "OFF"}</p></div>
             </div>
             {state.expiry.squared_off && (
-              <p className="font-mono text-[10px] text-red-600 mt-2 flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Squared off for expiry — new entries blocked today</p>
+              <p className="font-mono text-[10px] text-red-600 mt-2 flex items-center gap-1"><AlertTriangle className="h-3 w-3" /> Squared off the expiring contract{state.settings.rollover_position ? " — rolling short to next month" : " — new entries blocked today"}</p>
             )}
-            <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits any open position at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days. {state.expiry.auto_roll ? "Auto-rolls to next month after expiry." : "Manual roll."}</p>
+            <p className="font-mono text-[10px] text-slate-400 mt-2">Auto-exits the expiring contract at {state.expiry.square_off_time} IST on expiry day; positions carry forward on all other days. {state.expiry.auto_roll ? (state.settings.rollover_position ? "On expiry it rolls AND re-opens the short on next month (position rollover)." : "Auto-rolls to next month after expiry.") : "Manual roll."}</p>
           </Widget>
 
           {/* Risk / Circuit Breaker */}
@@ -675,6 +676,12 @@ export default function Dashboard() {
                   </div>
                 ))}
               </div>
+              <label className="flex items-center justify-between gap-2 mt-3 cursor-pointer select-none" data-testid="rollover-toggle-label">
+                <span className="font-mono text-[10px] uppercase text-slate-500">Position rollover at expiry<br /><span className="text-slate-400 normal-case">re-open short on next month after square-off</span></span>
+                <input type="checkbox" checked={!!form.rollover_position} disabled={state.running}
+                  onChange={(e) => setForm({ ...form, rollover_position: e.target.checked })}
+                  className="h-4 w-4 accent-slate-900 disabled:opacity-40" data-testid="setting-rollover_position" />
+              </label>
               <button onClick={saveSettings} disabled={state.running} data-testid="save-settings-button"
                 className="w-full mt-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-mono uppercase text-xs tracking-wider px-4 py-2 transition-colors flex items-center justify-center gap-2">
                 <Save className="h-3.5 w-3.5" /> Apply {state.running && "(stop bot first)"}

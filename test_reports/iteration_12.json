@@ -1,0 +1,37 @@
+{
+  "summary": "Validated TRUE POSITION ROLLOVER end-to-end: square-off arms _rollover_armed -> _autoload_after_roll triggers _rollover_enter which places a fresh SHORT (reason=EXPIRY_ROLLOVER) on the new contract. Verified setting toggle (true/false), market-closed guard, flat-at-expiry guard, reset() clears the flag, settings persist via API, and the UI checkbox renders/toggles. All prior expiry/market/exit-retry/session-health regression tests still green.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_rollover_position.py",
+    "/app/test_reports/pytest/pytest_rollover_position.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Note (non-blocking): _autoload_after_roll() clears _rollover_armed BEFORE awaiting _rollover_enter(); on a market-closed skip this means a future tick won't re-arm. Acceptable per spec ('rollover skipped — market closed'), but consider documenting that rollover does NOT carry across to the next session.",
+    "server.py is ~1280 lines — past the 700-line guideline; consider splitting TradingEngine into engine.py, expiry.py, risk.py, persistence.py for maintainability.",
+    "FastAPI @app.on_event('startup'/'shutdown') are deprecated — migrate to lifespan handlers (warnings emitted during tests)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_rollover_position.py (new)"
+  ],
+  "success_rate": {"backend": "100% (12/12 new + 46/46 regression)", "frontend": "100%"},
+  "test_credentials": "n/a (no auth in app)",
+  "seed_data_creation": "In-process: monkey-patched engine.broker.connected=True, broker.fut_*, _expiry_status, _market_open, _execute_order. No DB seed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Rollover behaviour proven at unit-level only (broker order methods mocked). For a true live integration on next expiry day, watch _autoload_after_roll() flow and verify _rollover_enter alert appears, then ENTRY order with reason=EXPIRY_ROLLOVER hits Angel One. UI test toggled the checkbox during the run and restored it to true via /api/settings.",
+  "regression_runs": [
+    "test_expiry_auto_roll.py — 18 passed",
+    "test_market_freeze.py — 9 passed",
+    "test_exit_retry_throttle.py — 7 passed",
+    "test_session_health_guard.py — 12 passed"
+  ]
+}
