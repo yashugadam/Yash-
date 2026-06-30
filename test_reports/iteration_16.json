@@ -1,0 +1,40 @@
+{
+  "summary": "Backend-only in-process pytest for the NEW `_auto_detect_manual_position()` running-mode broker poll (anti-stacking guard). Created /app/backend/tests/test_auto_detect_manual_position.py with 11 tests covering every decision point in the review_request: (1) while running & flat & no pending_adoption & broker SHORT(-65) -> pending_adoption={qty:65, side:'SHORT', netqty:-65, avgprice:24000, declined:False} with a 'warning' level alert ('SHORT' and '65' both present in alert.msg), engine.position stays None, broker.place_limit_order NEVER invoked (wired as hard-fail spy); (2) THROTTLE: two rapid back-to-back calls -> broker.get_net_position invoked exactly ONCE (counter-spy verified); (3) extra throttle test with broker FLAT path (pending stays None, but 2nd call still blocked by 30s window); (4) NO-OP when engine.position already tracked (spy.calls==0); (5) NO-OP when pending_adoption already set (spy.calls==0, existing pending untouched); (6) NO-OP when broker.connected=False (spy.calls==0); (7) LONG(+50) -> pending_adoption.side='LONG', alert.level='error'; (8) broker FLAT (netqty=0) leaves pending_adoption=None; (9) broker not_found leaves pending_adoption=None; (10) once pending_adoption is set, engine._entries_blocked() returns True (anti-stacking guard) — verified _entries_blocked()==False before, ==True after; (11) adopt_position(True) on the auto-detected SHORT promotes pending_adoption to engine.position (qty:65 @ 24000, entry_order_id='ADOPTED_MANUAL'), clears pending_adoption, NO order placed (place_limit_order hard-fail spy never tripped). engine._last_pos_check reset to 0.0 in autouse fixture per agent_to_agent_context_note. Regression: re-ran 10 prior pytest suites (test_adopt_on_start, test_broker_pnl, test_exit_retry_throttle, test_expiry_auto_roll, test_feature_batch, test_market_freeze, test_reconcile_sync, test_renko_bot[skipped — hits live API], test_rollover_position[merged into expiry/feature batch], test_security_fixes, test_session_health_guard) — 133 passed, 1 skipped, 0 failures. test_renko_bot.py was excluded from regression because it hits the live /api endpoints (would start/stop the live bot) — same exclusion used in iteration_15. /api/bot/start was NEVER invoked, no live Angel One calls, no orders placed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_auto_detect_manual_position.py",
+    "/app/test_reports/pytest/pytest_auto_detect.xml",
+    "/app/test_reports/pytest/pytest_full_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_auto_detect_manual_position() correctly guards with `if self.position is not None or self.pending_adoption is not None: return` BEFORE updating _last_pos_check — this is the right order: a NO-OP path must NOT consume the throttle window, otherwise after declining adoption and manually closing the broker position, the next legitimate detection could be silently delayed by 30s. Verified.",
+    "Throttle update (`self._last_pos_check = now`) happens BEFORE the broker call. Good — if get_net_position raises, the next attempt is still throttled (prevents tight retry loops on a flaky broker). However: the function does NOT wrap the broker call in try/except, so a broker exception will propagate up into run_loop. Recommend wrapping with try/except + warning alert for resilience (consistent with how reconcile_sync handles broker failures).",
+    "30s throttle is hard-coded as a magic number in two places (lines 692 of server.py). Extract to a class constant `POSITION_CHECK_INTERVAL_S = 30` for clarity and to enable test-time override without monkey-patching time.time().",
+    "_auto_detect_manual_position is invoked from run_loop only on the CONNECTED market-open branch (line 1002). On a disconnect/reconnect, the FIRST call after reconnection will fire immediately (since _last_pos_check is not bumped during disconnected window) — this is the correct behaviour (catch stale manual positions ASAP after reconnect).",
+    "LONG detection path does NOT log to broker alerts with as much context as SHORT (no 'manual trade?' phrasing). Cosmetic; consider unifying the alert phrasing between _on_start and _auto_detect_manual_position so the user sees the same message regardless of when the position was opened.",
+    "server.py is now 1406 lines (>700 guideline). Carry-over from prior iterations. Consider extracting broker reconciliation/adoption/auto-detect into a separate `adoption.py` module — _on_start, _auto_detect_manual_position, and adopt_position share ~70% of their structure.",
+    "FastAPI on_event('startup'/'shutdown') deprecation warnings persist (carry-over, not introduced by this feature)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auto_detect_manual_position.py (NEW, 11 tests)"
+  ],
+  "success_rate": {
+    "backend": "100% (11/11 new + 122/122 regression passed, 1 skipped)",
+    "frontend": "not tested (testing_type=backend per request)"
+  },
+  "test_credentials": "n/a (no app auth; broker.get_net_position & broker.place_limit_order mocked, /api/bot/start NOT invoked per agent_to_agent_context_note)",
+  "seed_data_creation": "None. All engine state set directly via autouse monkeypatch fixture (engine.running=True, position=None, pending_adoption=None, _last_pos_check=0.0). _persist_state stubbed to no-op.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Anti-stacking running-mode broker poll is fully covered. The 11 new tests use a _Counter spy class to verify exact call counts on broker.get_net_position (essential for the throttle assertion). broker.place_limit_order is wired as a hard-fail spy so any future regression that accidentally places a real order during auto-detect or adoption will fail loudly. test_renko_bot.py was excluded from regression because it hits the live /api endpoints — same as iteration_15. If a future test must run that file, it must come with a guarantee that /api/bot/stop {square_off:false} is called in teardown. The run_loop integration point (line 1002 in server.py) was NOT exercised because that requires driving the full run_loop with mocked time/clock — the unit-level coverage on _auto_detect_manual_position is sufficient to prove correctness of the new logic per the review_request.",
+  "rca of the issue": "n/a — new feature coverage, not a bug fix. One test-selector bug (alert['text'] vs alert['msg']) was fixed in-line during the first pytest run; the engine stamps alerts with the field name 'msg' (consistent with iteration_15 which had a similar 'level' vs 'severity' fix). No production code modified."
+}

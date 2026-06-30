@@ -131,6 +131,7 @@ class TradingEngine:
         # On Start: if Angel One holds a short we didn't open (e.g. a manual trade taken while the
         # bot was off), surface it for the user to ADOPT so the bot manages its exit per strategy.
         self.pending_adoption = None                   # {qty, avgprice, netqty, declined}
+        self._last_pos_check = 0.0                      # throttle for running-mode position detection
         self.persist_counter = 0
         # risk: daily max-loss circuit breaker
         self.day_key: Optional[str] = None            # IST date the day P&L belongs to
@@ -679,6 +680,36 @@ class TradingEngine:
         past_cut = ist.time() >= dtime(hh, mm)
         return ist, today, exp, is_today, past_cut
 
+    async def _auto_detect_manual_position(self):
+        """While the bot is running and thinks it's flat, periodically check Angel One for an
+        untracked position (e.g. a manual short opened without Stopping the bot). If found,
+        surface it for adoption — which also BLOCKS new entries so the bot never stacks on it."""
+        if self.position is not None or self.pending_adoption is not None:
+            return
+        if not self.broker.connected:
+            return
+        now = time.time()
+        if now - self._last_pos_check < 30:
+            return
+        self._last_pos_check = now
+        np = await asyncio.to_thread(self.broker.get_net_position)
+        if not np.get("found"):
+            return
+        qty = int(np.get("netqty") or 0)
+        if qty < 0:
+            self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
+                                     "netqty": qty, "side": "SHORT", "declined": False}
+            self._set_alert(f"Detected an untracked SHORT of {abs(qty)} qty on Angel One (manual trade?). "
+                            f"Adopt it so the bot manages the exit — new entries are paused until you decide.",
+                            "warning")
+            await self._persist_state()
+        elif qty > 0:
+            self.pending_adoption = {"qty": qty, "avgprice": np.get("avgprice"),
+                                     "netqty": qty, "side": "LONG", "declined": False}
+            self._set_alert(f"Detected a LONG position ({qty} qty) on Angel One — outside the short-only "
+                            f"strategy. Bot will NOT trade until it's resolved.", "error")
+            await self._persist_state()
+
     async def _on_start(self):
         """Called when the bot is turned ON. First reconcile with Angel One: if the broker
         holds a position on our instrument that the bot isn't managing (e.g. a manual trade
@@ -965,6 +996,10 @@ class TradingEngine:
                             if self._disc_flagged:
                                 self._disc_flagged = False
                                 self._set_alert("Angel One reconnected — strategy resumed.", "info")
+                            # Detect a manual/untracked broker position even while the bot is
+                            # already running (e.g. a manual short taken without Stopping the bot),
+                            # so it can be adopted instead of stacked on. Throttled to ~30s.
+                            await self._auto_detect_manual_position()
                             self.ticks_in_bar += 1
                             self._update_unrealized()
                             if self.ticks_in_bar >= self.settings["bar_seconds"]:
