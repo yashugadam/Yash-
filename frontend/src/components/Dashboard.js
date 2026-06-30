@@ -134,6 +134,14 @@ export default function Dashboard() {
     poll(); loadTrades();
   };
 
+  const resolveAdoption = async (confirm) => {
+    try {
+      const { data } = await axios.post(`${API}/bot/adopt`, { confirm });
+      data.ok ? toast.success(data.message) : toast.error(data.message);
+    } catch (e) { toast.error("Adoption request failed"); }
+    poll(); loadTrades();
+  };
+
   const checkReconcile = useCallback(async () => {
     setReconBusy(true);
     try { const { data } = await axios.get(`${API}/bot/reconcile`); setRecon(data); }
@@ -300,6 +308,43 @@ export default function Dashboard() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={!!(state?.pending_adoption && !state.pending_adoption.declined)}>
+        <AlertDialogContent data-testid="adoption-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Existing Angel One position found</AlertDialogTitle>
+            <AlertDialogDescription>
+              {state?.pending_adoption?.side === "LONG" ? (
+                <>
+                  Angel One shows a <b>LONG position</b> ({state.pending_adoption.qty} qty), which is
+                  outside your short-only strategy. The bot will <b>not trade</b> until this is resolved.
+                  Close it on Angel One, or dismiss this to keep the bot idle.
+                </>
+              ) : (
+                <>
+                  Angel One shows an <b>open SHORT</b> of <b>{state?.pending_adoption?.qty} qty</b>
+                  {state?.pending_adoption?.avgprice ? <> @ avg <b>{state.pending_adoption.avgprice}</b></> : null}
+                  {" "}that the bot didn't open (e.g. a manual trade). Adopt it so the bot
+                  <b> manages the exit per your strategy</b> (exit on the green-brick reversal)?
+                  Until you decide, the bot won't open any new trade (to avoid stacking).
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => resolveAdoption(false)} data-testid="adoption-decline-button">
+              Don't adopt
+            </AlertDialogCancel>
+            {state?.pending_adoption?.side !== "LONG" && (
+              <AlertDialogAction onClick={() => resolveAdoption(true)} data-testid="adoption-confirm-button"
+                className="bg-slate-900 hover:bg-slate-800">
+                Adopt &amp; manage exit
+              </AlertDialogAction>
+            )}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
 
       <AlertDialog open={showStartConfirm} onOpenChange={setShowStartConfirm}>
         <AlertDialogContent data-testid="start-confirm-dialog">

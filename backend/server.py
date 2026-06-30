@@ -128,6 +128,9 @@ class TradingEngine:
         self.order_lock = asyncio.Lock()
         self.squared_off_date: Optional[str] = None   # date (IST) we already squared off / blocked entries
         self._rollover_armed = False                   # set at expiry square-off to re-short next month
+        # On Start: if Angel One holds a short we didn't open (e.g. a manual trade taken while the
+        # bot was off), surface it for the user to ADOPT so the bot manages its exit per strategy.
+        self.pending_adoption = None                   # {qty, avgprice, netqty, declined}
         self.persist_counter = 0
         # risk: daily max-loss circuit breaker
         self.day_key: Optional[str] = None            # IST date the day P&L belongs to
@@ -676,10 +679,64 @@ class TradingEngine:
         past_cut = ist.time() >= dtime(hh, mm)
         return ist, today, exp, is_today, past_cut
 
+    async def _on_start(self):
+        """Called when the bot is turned ON. First reconcile with Angel One: if the broker
+        holds a position on our instrument that the bot isn't managing (e.g. a manual trade
+        taken while the bot was off), surface it for adoption (no auto-entry, no stacking).
+        Otherwise, run the normal enter-on-start logic."""
+        self.pending_adoption = None
+        if self.broker.connected and self.position is None:
+            np = await asyncio.to_thread(self.broker.get_net_position)
+            if np.get("found"):
+                qty = int(np.get("netqty") or 0)
+                if qty < 0:   # SHORT on Angel One that the bot isn't tracking -> ask to adopt
+                    self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
+                                             "netqty": qty, "side": "SHORT", "declined": False}
+                    self._set_alert(f"Found an existing SHORT of {abs(qty)} qty on Angel One. "
+                                    f"Adopt it so the bot manages the exit?", "warning")
+                    await self._persist_state()
+                    return
+                if qty > 0:   # LONG is outside the short-only strategy
+                    self.pending_adoption = {"qty": qty, "avgprice": np.get("avgprice"),
+                                             "netqty": qty, "side": "LONG", "declined": False}
+                    self._set_alert(f"A LONG position ({qty} qty) exists on Angel One — outside the "
+                                    f"short-only strategy. Bot will NOT trade until it's resolved.", "error")
+                    await self._persist_state()
+                    return
+        await self._maybe_enter_on_start()
+
+    async def adopt_position(self, confirm: bool):
+        """User's decision on the existing Angel One position found at Start."""
+        pa = self.pending_adoption
+        if not pa:
+            return {"ok": False, "message": "No position pending adoption."}
+        if not confirm:
+            self.pending_adoption = {**pa, "declined": True}  # keep blocking entries, hide prompt
+            self._set_alert("Position not adopted — bot will NOT open new trades while this "
+                            "Angel One position is open. Close it manually or Stop & Start to re-check.", "warning")
+            await self._persist_state()
+            return {"ok": True, "message": "Declined — new entries stay blocked to avoid stacking."}
+        if pa.get("side") == "LONG":
+            self.pending_adoption = {**pa, "declined": True}
+            return {"ok": False, "message": "Long positions aren't supported by the short-only strategy."}
+        # adopt the SHORT and let the strategy manage its exit
+        self.position = {
+            "side": "SHORT", "qty": pa["qty"], "entry_price": pa.get("avgprice") or self.price,
+            "entry_time": now_iso(), "entry_order_id": "ADOPTED_MANUAL",
+            "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
+        }
+        self.pending_adoption = None
+        self.pending_entry = self.pending_exit = False
+        self._set_alert(f"Adopted existing SHORT ({self.position['qty']} qty @ "
+                        f"{self.position['entry_price']}). Bot will exit it per the strategy.", "info")
+        await self._persist_state()
+        return {"ok": True, "message": "Adopted — managing exit per strategy."}
+
     def _entries_blocked(self):
-        # No new entries once we've hit the expiry-day square-off window or the circuit breaker.
+        # No new entries once we've hit the expiry-day square-off window, the circuit breaker,
+        # or while an un-adopted Angel One position is awaiting the user's decision (no stacking).
         _, _, _, is_today, past_cut = self._expiry_status()
-        return bool((is_today and past_cut) or self.breaker_tripped)
+        return bool((is_today and past_cut) or self.breaker_tripped or self.pending_adoption is not None)
 
     # -------- risk: daily max-loss circuit breaker --------
     def _check_circuit_breaker(self):
@@ -986,6 +1043,7 @@ class TradingEngine:
         self.exit_retry_pending = False
         self._exit_retry_count = 0
         self._rollover_armed = False
+        self.pending_adoption = None
         self.forced_exit_pending = False
         self.alert = None
         self.squared_off_date = None
@@ -1006,6 +1064,7 @@ class TradingEngine:
             "running": self.running,
             "mode": self.mode,
             "market_open": self._market_open(),
+            "pending_adoption": self.pending_adoption,
             "feed_mode": self.feed_mode,
             "feed_error": self.feed_error,
             "alert": self.alert,
@@ -1088,9 +1147,18 @@ async def get_state():
 async def start_bot():
     engine.running = True
     await engine._persist_state()
-    # enter immediately if we're starting into an existing 2+ red down-run
-    asyncio.create_task(engine._maybe_enter_on_start())
+    # reconcile with Angel One (adopt a manual position if present), else enter-on-start
+    asyncio.create_task(engine._on_start())
     return {"running": True}
+
+
+class AdoptRequest(BaseModel):
+    confirm: bool = False
+
+
+@api_router.post("/bot/adopt")
+async def adopt_position(req: AdoptRequest):
+    return await engine.adopt_position(req.confirm)
 
 
 class StopRequest(BaseModel):

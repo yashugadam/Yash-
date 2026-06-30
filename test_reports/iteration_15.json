@@ -1,0 +1,38 @@
+{
+  "summary": "Backend-only in-process pytest for the new 'Adopt manual trade on Start' feature. Created /app/backend/tests/test_adopt_on_start.py with 18 tests covering all decision points from the request: _on_start with broker SHORT/-65 sets engine.pending_adoption={qty:65, avgprice:24000, netqty:-65, side:'SHORT', declined:False}, raises a warning alert, does NOT call _maybe_enter_on_start, and keeps engine.position=None; _entries_blocked() returns True while pending_adoption is set (also after decline) and False once cleared; adopt_position(True) on a SHORT promotes pending_adoption into engine.position (qty 65 @ 24000, entry_order_id='ADOPTED_MANUAL'), clears pending_adoption, and surfaces 'Adopted...' info alert — without ever calling broker.place_limit_order (guarded by a hard-fail spy); adopt_position(False) sets declined=True (entries stay blocked) and leaves engine.position=None; LONG (+50) sets pending_adoption.side='LONG' with an error-level alert and blocks entries; adopt_position(True) on LONG returns ok:False ('long positions aren't supported'); broker FLAT (netqty=0) leaves pending_adoption=None and proceeds to _maybe_enter_on_start (place_limit_order still NOT called because the engine has no bricks); reset() clears pending_adoption; snapshot()/GET /api/state include the 'pending_adoption' key + all legacy keys; POST /api/bot/adopt routes to engine.adopt_position for both confirm and decline; the no-pending case returns ok:False. broker.get_net_position and broker.place_limit_order were monkey-patched in every test — NO live Angel One calls were made and the public /api/bot/start endpoint was NOT hit. Regression: re-ran 9 prior pytest files (test_reconcile_sync, test_expiry_auto_roll, test_market_freeze, test_exit_retry_throttle, test_session_health_guard, test_feature_batch, test_security_fixes, test_rollover_position, test_broker_pnl) — 104 passed, 1 skipped, 0 failures.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_adopt_on_start.py",
+    "/app/test_reports/pytest/pytest_adopt_on_start.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Adoption logic in server.py is clean and idempotent: _on_start() resets pending_adoption=None first, gates the broker check on `self.broker.connected and self.position is None`, and persists state before returning so the dashboard sees the prompt immediately on the next poll. Good.",
+    "adopt_position(False) intentionally keeps pending_adoption with declined=True (rather than None) so _entries_blocked() stays True — this correctly enforces the no-stacking rule per user decision (3) and the Dashboard hides the modal via `!declined`. Recommend documenting how the block is cleared (Stop & Start re-runs _on_start which sets pending_adoption=None first; or a manual broker close + reconcile) — currently only the warning alert mentions it.",
+    "adopt_position(True) on a LONG sets pending_adoption.declined=True (keeping the block) but never persists or sets an alert. Consider awaiting self._persist_state() here for parity with the SHORT/decline branches so the state is durable across restarts.",
+    "ADOPTED_MANUAL entry uses pa.get('avgprice') or self.price as the entry_price. If broker returns avgprice=0 (rare but seen in some Angel One responses), it falls back to self.price which is fine; just be aware reds_at_entry defaults to (self.down_run_reds or 2) so a freshly started engine with no bricks gets reds_at_entry=2 — acceptable but worth a comment.",
+    "server.py is now 1370 lines (>700 guideline). Carry-over from prior iterations. Consider extracting broker-reconciliation/adoption into its own module.",
+    "FastAPI on_event('startup'/'shutdown') deprecation warnings persist (not introduced by this feature)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_adopt_on_start.py (NEW)"
+  ],
+  "success_rate": {
+    "backend": "100% (18/18 new + 104/104 regression passed)",
+    "frontend": "not tested (testing_type=backend per request)"
+  },
+  "test_credentials": "n/a (no app auth; broker calls mocked, /api/bot/start NOT invoked per agent_to_agent_context_note)",
+  "seed_data_creation": "None. All state was set directly on the in-process engine via monkeypatch fixtures; no DB writes (persist_state stubbed to no-op).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Adoption feature is fully covered at the engine + API layer. broker.place_limit_order is wired as a hard-fail spy in test_adopt_on_start.py so any future regression that accidentally places a real order during the adoption flow will fail loudly. Frontend AlertDialog with data-testids 'adoption-confirm-button' / 'adoption-decline-button' was NOT exercised — main agent can self-test in preview by waiting for state.pending_adoption to surface (only possible right after a real Start with a manual broker short, which is dangerous on live money). The /api/bot/start route was deliberately NOT hit because it would flip the live bot to running; instead engine._on_start() was driven directly in-process. If a future test must hit the live API, follow it with POST /api/bot/stop {square_off:false} to restore idle state.",
+  "rca of the issue": "n/a — this iteration added test coverage for a NEW feature, not a bug fix. Initial failure on alert['severity'] vs alert['level'] was a test-selector bug fixed in-line (the engine actually stamps alerts with the field name 'level'). No production code was modified."
+}
