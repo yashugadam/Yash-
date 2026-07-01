@@ -969,17 +969,20 @@ class TradingEngine:
             logger.info("Auto-reconnected Angel One (session had dropped)")
 
     async def _refresh_broker_pnl(self):
-        """Pull real day P&L from Angel One (throttled ~8s), but ONLY during market hours
-        (Mon–Fri 09:15–15:30 IST). Angel One often returns stale/garbage day P&L outside
-        the session, so after the close we FREEZE the last in-hours value instead of
-        overwriting it with bad data. Runs whether or not the bot is 'running' so manual-
-        panel trades are reflected too."""
+        """Pull real day P&L from Angel One's position() endpoint, but SPARINGLY. That endpoint
+        is capped at 1 request/second by Angel One and is SHARED with get_net_position — if we
+        poll it too often it throttles the whole session and starves the LTP price feed (bricks
+        stop forming). So we only fetch: (a) during market hours, (b) at most every 20s, and
+        (c) only while the bot is running or actually holding a position. Outside market hours
+        the last in-hours value is FROZEN (Angel returns garbage P&L after close)."""
         if not self.broker.connected:
             return
         if not self._market_open():
             return
+        if not (self.running or self.position):
+            return
         now = time.time()
-        if now - self._last_pnl_fetch < 8:
+        if now - self._last_pnl_fetch < 20:
             return
         self._last_pnl_fetch = now
         try:
