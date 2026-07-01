@@ -716,20 +716,25 @@ class TradingEngine:
         """Once per day, the first time the market is open AND Angel One is connected,
         auto-reconcile: if the broker holds a position the bot isn't tracking (e.g. a manual
         short carried overnight), surface it for adoption so the bot never stacks a new short
-        on top of it. Runs only while the bot is flat; if already managing a position, just
-        marks the day done. Replaces the old continuous 2-min polling with a single safe check."""
+        on top of it. Fully defensive — any failure here must NEVER block the strategy loop
+        (brick building), so it swallows its own errors and only ever attempts once per day."""
         today = datetime.now(IST).date().isoformat()
         if self._open_recon_date == today:
             return
         if not self.broker.connected:
             return
-        if self.position is not None or self.pending_adoption is not None:
-            self._open_recon_date = today
-            return
-        np = await asyncio.to_thread(self.broker.get_net_position)
-        if not np.get("found"):
-            return  # broker read failed — retry next tick, don't burn today's check
+        # Mark done up-front so this runs at most ONCE per day even if the broker read fails —
+        # a failed safety check must not turn into a per-tick network call that stalls bricks.
         self._open_recon_date = today
+        if self.position is not None or self.pending_adoption is not None:
+            return
+        try:
+            np = await asyncio.to_thread(self.broker.get_net_position)
+        except Exception as e:
+            logger.warning("market-open reconcile read failed: %s", e)
+            return
+        if not np.get("found"):
+            return
         qty = int(np.get("netqty") or 0)
         if qty < 0:
             self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
@@ -1011,10 +1016,6 @@ class TradingEngine:
                             if self._disc_flagged:
                                 self._disc_flagged = False
                                 self._set_alert("Angel One reconnected — strategy resumed.", "info")
-                            # One-time daily safety reconcile at market open: adopt any
-                            # untracked broker position (manual/carry-forward) so the bot
-                            # never stacks a new short on top of it.
-                            await self._market_open_reconcile()
                             self.ticks_in_bar += 1
                             self._update_unrealized()
                             if self.ticks_in_bar >= self.settings["bar_seconds"]:
@@ -1024,6 +1025,11 @@ class TradingEngine:
                             self._maybe_square_off()
                             self._check_circuit_breaker()
                             self._maybe_auto_roll()
+                            # One-time daily safety reconcile at market open: adopt any
+                            # untracked broker position (manual/carry-forward) so the bot
+                            # never stacks a new short on top of it. Runs AFTER brick building
+                            # and is fully self-guarded so it can never block the strategy.
+                            await self._market_open_reconcile()
                             # Retry a failed EXIT — THROTTLED (>= EXIT_RETRY_MIN_GAP apart)
                             # and CAPPED (MAX_EXIT_RETRIES) so a persistent broker rejection
                             # can't hammer the API once per tick. After the cap, halt and hold.
