@@ -38,6 +38,7 @@ export default function Dashboard() {
   const [form, setForm] = useState(null);
   const prevPrice = useRef(null);
   const lastAlertId = useRef(null);
+  const runLock = useRef(null);   // {running, until} — pin button to user's intent, ignore stale polls
   const [flash, setFlash] = useState("");
   const [instQuery, setInstQuery] = useState("");
   const [instResults, setInstResults] = useState([]);
@@ -68,6 +69,12 @@ export default function Dashboard() {
   const poll = useCallback(async () => {
     try {
       const { data } = await axios.get(`${API}/state`);
+      // A Start/Stop click briefly pins `running` to the user's intent so out-of-order
+      // /state responses (stale requests still in flight) can't flip the button back.
+      if (runLock.current) {
+        if (Date.now() < runLock.current.until) data.running = runLock.current.running;
+        else runLock.current = null;
+      }
       setState((old) => {
         if (old && data.price !== old.price) {
           setFlash(data.price > old.price ? "flash-green" : "flash-red");
@@ -120,6 +127,7 @@ export default function Dashboard() {
 
   const confirmStart = async () => {
     setShowStartConfirm(false);
+    runLock.current = { running: true, until: Date.now() + 6000 };
     await axios.post(`${API}/bot/start`);
     toast.warning("Bot started — LIVE real-money trading is ACTIVE");
     poll();
@@ -127,6 +135,7 @@ export default function Dashboard() {
 
   const confirmStop = async () => {
     setShowStopConfirm(false);
+    runLock.current = { running: false, until: Date.now() + 6000 };
     const hadPosition = !!state?.position;
     const { data } = await axios.post(`${API}/bot/stop`, { square_off: true });
     if (data.squared_off) toast.info("Position squared off (forced exit) — bot stopped");
