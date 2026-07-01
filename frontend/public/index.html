@@ -36,13 +36,31 @@
     </head>
     <body>
         <noscript>
-            Renko Nifty Bot is an automated NIFTY Futures algorithmic trading
-            dashboard. It builds Renko bricks (50-point brick size, 1-minute
-            timeframe) from live market data and places real-money orders through
-            the Angel One SmartAPI. The strategy enters short positions when two
-            red bricks form and exits on green-brick reversals, with broker
-            reconciliation, an auto-reconnect watchdog, and a live order and
-            rejection log. Please enable JavaScript to use the trading dashboard.
+            <h1>Renko Nifty Bot — Automated NIFTY Futures Algo Trading</h1>
+            <p>
+                Renko Nifty Bot is an automated NIFTY Futures algorithmic trading
+                dashboard. It builds Renko bricks (50-point brick size, 1-minute
+                timeframe) from live market data and places real-money orders through
+                the Angel One SmartAPI.
+            </p>
+            <h2>Strategy</h2>
+            <p>
+                The strategy enters a short position when two consecutive red Renko
+                bricks form. It exits on the first green brick when four or fewer red
+                bricks have printed, and waits for two green bricks to exit when more
+                than four red bricks have printed. Positions can be carried forward and
+                rolled over to the next-month expiry automatically.
+            </p>
+            <h2>Features</h2>
+            <ul>
+                <li>Live 1-minute Renko chart with 50-point brick size for NIFTY Futures.</li>
+                <li>Real-money order execution via Angel One SmartAPI with SEBI-compliant limit orders.</li>
+                <li>Broker reconciliation to detect and adopt manual or carry-forward positions.</li>
+                <li>Auto-reconnect watchdog for Angel One WebSocket drops.</li>
+                <li>Market-hours gating (Mon–Fri, 09:15–15:30 IST) with a daily max-loss circuit breaker.</li>
+                <li>Live order and rejection log with real Angel One day P&amp;L.</li>
+            </ul>
+            <p>Please enable JavaScript to use the trading dashboard.</p>
         </noscript>
         <div id="root"></div>
         <!--
