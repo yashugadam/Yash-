@@ -42,6 +42,10 @@ MAX_ORDER_QTY = 5000
 MAX_EXIT_RETRIES = 8
 EXIT_RETRY_MIN_GAP = 15        # seconds between auto exit-retries
 
+# Transient alerts are served in /api/state only for this window, then dropped —
+# so an old toast can't re-fire indefinitely on mobile tab-resume / remounts.
+ALERT_TTL_SEC = 20
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -119,6 +123,7 @@ class TradingEngine:
         self.exit_retry_pending = False
         self.forced_exit_pending = False
         self.alert = None
+        self._alert_ts = 0.0                           # epoch of last alert; expires from /api/state after ALERT_TTL_SEC
 
         # books
         self.orders: List[Dict[str, Any]] = []
@@ -378,6 +383,7 @@ class TradingEngine:
 
     def _set_alert(self, msg, level="info"):
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
+        self._alert_ts = time.time()
         logger.warning("ALERT(%s): %s", level, msg)
 
     async def _live_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
@@ -1111,7 +1117,7 @@ class TradingEngine:
             "pending_adoption": self.pending_adoption,
             "feed_mode": self.feed_mode,
             "feed_error": self.feed_error,
-            "alert": self.alert,
+            "alert": self.alert if (self.alert and time.time() - self._alert_ts < ALERT_TTL_SEC) else None,
             "angel": self.broker.status(),
             "price": round(self.price, 2),
             "prev_price": round(self.prev_price, 2),
