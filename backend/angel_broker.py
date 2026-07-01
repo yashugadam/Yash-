@@ -8,12 +8,15 @@ and must be invoked from the engine via asyncio.to_thread.
 import logging
 import os
 import re
+import time
+import threading
 from contextlib import contextmanager
 from datetime import datetime, date
 
 import pyotp
 import requests
 from SmartApi import SmartConnect
+from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 from urllib.parse import urlsplit, urlunsplit, quote
 
 logger = logging.getLogger("renko-bot.angel")
@@ -46,6 +49,11 @@ SCRIP_MASTER_URL = (
 )
 
 TICK_SIZE = 0.05   # NSE/NFO price tick — all order prices must be a multiple of this
+
+# WebSocket LTP feed: if no streaming tick has arrived within this many seconds we treat
+# the stream as stale and fall back to a REST ltpData call (which also self-heals the session).
+FEED_STALE_SEC = 15
+NSE_FO_EXCHANGE = 2   # SmartWebSocketV2 exchangeType for NSE F&O (NFO)
 
 
 _CRED_URL_RE = re.compile(r'(https?://)[^/\s:@]+:[^/\s@]+@', re.IGNORECASE)
@@ -101,6 +109,16 @@ class AngelBroker:
         self.fut_name = ""
         self.fut_type = ""
         self.futures = []
+        # session tokens needed for the streaming market-data websocket
+        self._jwt = ""
+        self._feed_token = ""
+        # live LTP streaming feed (SmartWebSocketV2) — replaces per-second REST polling
+        self._sws = None
+        self._sws_thread = None
+        self._subscribed_token = None
+        self.feed_connected = False
+        self.last_ltp = None
+        self.last_ltp_ts = 0.0
 
     def login(self, api_key, client_code, pin, totp_secret):
         self.error = ""
@@ -115,6 +133,14 @@ class AngelBroker:
                 logger.warning("Angel login failed: %s", self.error)
                 return {"connected": False, "error": self.error}
             self.client_code = client_code
+            # capture the tokens the streaming websocket needs (jwt must be sent WITHOUT
+            # the "Bearer " prefix, or SmartWebSocketV2 rejects it as an invalid token)
+            sess = data.get("data") or {}
+            jwt = sess.get("jwtToken", "") or ""
+            if jwt.startswith("Bearer "):
+                jwt = jwt[7:]
+            self._jwt = jwt
+            self._feed_token = sess.get("feedToken", "") or ""
             try:
                 prof = self.smart.getProfile(data["data"].get("refreshToken", ""))
                 self.profile_name = prof.get("data", {}).get("name", "") if prof else ""
@@ -122,6 +148,7 @@ class AngelBroker:
                 self.profile_name = ""
             self.connected = True
             self._resolve_nifty_fut()
+            self.start_feed()   # begin streaming LTP over the websocket (no REST polling)
             logger.info("Angel connected (%s), future=%s token=%s", client_code,
                         self.fut_symbol, self.fut_token)
             return {"connected": True, "future": self.fut_symbol, "token": self.fut_token,
@@ -228,9 +255,109 @@ class AngelBroker:
         res = self.login(self.api_key, self.client_code, self._pin, self._totp)
         return bool(res.get("connected"))
 
+    # -------- live LTP streaming feed (SmartWebSocketV2) --------
+    def start_feed(self):
+        """Start the SmartWebSocketV2 market-data stream for the selected future. The
+        streaming feed replaces per-second REST polling of ltpData, which was tripping
+        Angel One's rate limits and stalling the chart. Runs in a daemon thread because
+        SmartWebSocketV2.connect() is a blocking loop with its own auto-reconnect."""
+        if not (self.connected and self.fut_token and self._jwt and self._feed_token):
+            return
+        self.stop_feed()   # tear down any previous stream before starting a fresh one
+        try:
+            sws = SmartWebSocketV2(self._jwt, self.api_key, self.client_code, self._feed_token,
+                                   max_retry_attempt=5, retry_strategy=1, retry_delay=10,
+                                   retry_multiplier=2, retry_duration=60)
+        except Exception as e:
+            logger.warning("SmartWebSocketV2 init failed: %s", e)
+            return
+        self._subscribed_token = None
+        start_token = self.fut_token
+
+        def on_open(wsapp):
+            try:
+                sws.subscribe("renko", SmartWebSocketV2.LTP_MODE,
+                              [{"exchangeType": NSE_FO_EXCHANGE, "tokens": [start_token]}])
+                self._subscribed_token = start_token
+                self.feed_connected = True
+                logger.info("WS open — subscribed %s (%s)", self.fut_symbol, start_token)
+            except Exception as e:
+                logger.warning("WS subscribe on_open failed: %s", e)
+
+        def on_data(wsapp, msg):
+            try:
+                if isinstance(msg, dict) and msg.get("last_traded_price") is not None:
+                    tok = str(msg.get("token") or "")
+                    if tok and tok != str(self.fut_token):
+                        return  # ignore ticks for a token we're no longer trading
+                    # SmartWebSocketV2 sends LTP in paise — convert to rupees
+                    self.last_ltp = float(msg["last_traded_price"]) / 100.0
+                    self.last_ltp_ts = time.time()
+                    self.feed_connected = True
+            except Exception as e:
+                logger.warning("WS on_data parse error: %s", e)
+
+        def on_error(wsapp, error):
+            self.feed_connected = False
+            logger.warning("WS error: %s", error)
+
+        def on_close(wsapp):
+            self.feed_connected = False
+            logger.info("WS closed")
+
+        sws.on_open = on_open
+        sws.on_data = on_data
+        sws.on_error = on_error
+        sws.on_close = on_close
+        self._sws = sws
+        t = threading.Thread(target=sws.connect, daemon=True, name="angel-ws")
+        t.start()
+        self._sws_thread = t
+        logger.info("Angel websocket LTP feed thread started")
+
+    def stop_feed(self):
+        sws = self._sws
+        self._sws = None
+        self.feed_connected = False
+        self._subscribed_token = None
+        if sws is not None:
+            try:
+                sws.close_connection()
+            except Exception:
+                pass
+
+    def _ensure_subscription(self):
+        """Re-point the live stream at the current future if it changed (expiry rollover)."""
+        sws = self._sws
+        if sws is None or not self.feed_connected:
+            return
+        if self._subscribed_token == self.fut_token:
+            return
+        try:
+            if self._subscribed_token:
+                sws.unsubscribe("renko", SmartWebSocketV2.LTP_MODE,
+                                [{"exchangeType": NSE_FO_EXCHANGE, "tokens": [self._subscribed_token]}])
+            sws.subscribe("renko", SmartWebSocketV2.LTP_MODE,
+                          [{"exchangeType": NSE_FO_EXCHANGE, "tokens": [self.fut_token]}])
+            self._subscribed_token = self.fut_token
+            self.last_ltp = None   # drop the previous contract's price
+            logger.info("WS re-subscribed to %s (%s)", self.fut_symbol, self.fut_token)
+        except Exception as e:
+            logger.warning("WS re-subscribe failed: %s", e)
+
     def get_ltp(self):
+        """Return the latest NIFTY-future LTP. Prefers the streaming websocket feed (no REST
+        rate-limit pressure); falls back to a REST ltpData call only when the stream is stale
+        or not yet warmed up. The REST path also self-heals an expired session and restarts
+        the feed with fresh tokens."""
         if not self.connected or not self.fut_token:
             return None
+        self._ensure_subscription()
+        if self.last_ltp is not None and (time.time() - self.last_ltp_ts) < FEED_STALE_SEC:
+            return float(round(self.last_ltp))
+        return self._get_ltp_rest()
+
+    def _get_ltp_rest(self):
         for attempt in range(2):
             try:
                 res = self.smart.ltpData("NFO", self.fut_symbol, self.fut_token)
@@ -241,7 +368,8 @@ class AngelBroker:
             except Exception as e:
                 self.error = str(e)
                 logger.warning("get_ltp failed (attempt %d): %s", attempt + 1, e)
-            # try one auto-relogin then retry (handles session/token expiry)
+            # try one auto-relogin then retry (handles session/token expiry). login()
+            # also restarts the streaming feed with the freshly issued tokens.
             if attempt == 0:
                 logger.info("Attempting Angel auto-relogin…")
                 if not self.relogin():
@@ -428,6 +556,7 @@ class AngelBroker:
         return {"found": False, "error": self.error}
 
     def logout(self):
+        self.stop_feed()
         try:
             if self.smart and self.client_code:
                 self.smart.terminateSession(self.client_code)
@@ -436,8 +565,11 @@ class AngelBroker:
         self.connected = False
 
     def status(self):
+        ltp_fresh = self.last_ltp is not None and (time.time() - self.last_ltp_ts) < FEED_STALE_SEC
         return {
             "connected": self.connected,
+            "streaming": bool(self.feed_connected and ltp_fresh),
+            "feed_ltp": round(self.last_ltp, 2) if self.last_ltp is not None else None,
             "client_code": mask_client(self.client_code),
             "name": self.profile_name,
             "future": self.fut_symbol,

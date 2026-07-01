@@ -47,13 +47,20 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
-- Manual trade adoption (June 2026): the every-2-min running-mode auto-polling was
-  REMOVED. Replaced with a ONE-TIME-PER-DAY market-open safety reconcile
-  (`_market_open_reconcile`, called in run_loop once market is open + connected):
-  if the broker holds an untracked position (manual/carry-forward) while the bot is
-  flat, it sets `pending_adoption` (blocks new entries, no stacking) and prompts the
-  user to adopt. Keyed by IST date (`_open_recon_date`); failed broker reads retry.
-  Manual "Sync to broker" reconcile + on-Start adopt (`_on_start`) still active.
+- LIVE MARKET DATA FEED (July 2026): migrated from per-second REST `ltpData` polling to
+  **SmartWebSocketV2 streaming** (`angel_broker.start_feed`, daemon thread, LTP mode,
+  exchangeType=2 NFO). Root cause of "no bricks": Angel One `position()` endpoint is capped
+  at 1 req/sec and shares throttle budget; per-tick polling starved the feed. Now:
+  * `get_ltp()` returns the streamed LTP (fresh < FEED_STALE_SEC=15s), else falls back to
+    REST `_get_ltp_rest()` (which also auto-relogins + restarts the feed with new tokens).
+  * jwt from generateSession must strip "Bearer " prefix; feedToken captured at login.
+  * on_data LTP is in paise → /100. Re-subscribes on expiry rollover (`_ensure_subscription`).
+  * status() exposes `streaming` + `feed_ltp`. UI badge shows "Streaming" when live.
+  * Verified in preview: feed_ltp streamed live (24117→24108→24107). Could NOT e2e-test a
+    RUNNING bot (would place a real order) — engine loop unchanged, still calls get_ltp().
+- P&L polling: position() fetched every 20s and only when running/holding (well under 1/sec).
+- Market-open safety reconcile: once/day, after brick-building, error-guarded.
+- Alerts expire from /api/state after ALERT_TTL_SEC=20 (stop repeating toasts on mobile).
 - LIVE REAL MONEY ONLY. Never place/modify/cancel orders or Start the bot without
   explicit user consent.
 - Production env vars are managed separately from preview .env; code fixes need a

@@ -257,8 +257,8 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
-          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.angel?.connected ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-red-100 text-red-700 border-red-200"}`} data-testid="feed-badge" title={state.feed_error || ""}>
-            <Activity className="h-3 w-3" /> {state.angel?.connected ? "Live Data" : "Disconnected"}
+          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.angel?.connected ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-red-100 text-red-700 border-red-200"}`} data-testid="feed-badge" title={state.angel?.streaming ? "Live LTP streaming over websocket" : (state.feed_error || "")}>
+            <Activity className="h-3 w-3" /> {state.angel?.connected ? (state.angel?.streaming ? "Streaming" : "Live Data") : "Disconnected"}
           </span>
           <span className="bg-red-600 text-white border border-red-700 px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1" data-testid="mode-badge" title="This bot trades LIVE with real money on Angel One">
             <Zap className="h-3 w-3" /> Live · Real Money
