@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 import os
 import asyncio
 import time
@@ -41,6 +42,14 @@ MAX_ORDER_QTY = 5000
 # manual intervention.
 MAX_EXIT_RETRIES = 8
 EXIT_RETRY_MIN_GAP = 15        # seconds between auto exit-retries
+
+# ---- multi-pod leadership: Emergent runs several backend pods. Only ONE (the leader)
+# may connect to Angel One, run the strategy loop and place orders — this guarantees no
+# duplicate real-money orders. All other pods are read-only and relay user actions to the
+# leader via a MongoDB command queue. The leader holds a short DB lease it renews each tick;
+# if it dies, another pod takes over within LEADER_LEASE_SEC.
+INSTANCE_ID = str(uuid.uuid4())
+LEADER_LEASE_SEC = 15
 
 # Transient alerts are served in /api/state only for this window, then dropped —
 # so an old toast can't re-fire indefinitely on mobile tab-resume / remounts.
@@ -147,6 +156,7 @@ class TradingEngine:
         self._last_pnl_fetch = 0.0
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
         self._open_recon_date: Optional[str] = None     # IST date we already ran the market-open safety reconcile
+        self.is_leader = False                           # True only on the pod that holds the trading lease
         self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
         self._last_reject_note = ""                    # last broker rejection reason (for alerts)
@@ -992,12 +1002,178 @@ class TradingEngine:
         except Exception as e:
             logger.warning("broker pnl refresh failed: %s", e)
 
+    # -------- multi-pod leadership + command relay --------
+    async def _acquire_leadership(self):
+        """Atomically claim/renew the trading lease. Returns True iff THIS pod is leader."""
+        now = time.time()
+        try:
+            doc = await self.db.leader_lock.find_one_and_update(
+                {"_id": "trading_engine", "$or": [
+                    {"expires_at": {"$lt": now}},
+                    {"holder": INSTANCE_ID},
+                ]},
+                {"$set": {"holder": INSTANCE_ID, "expires_at": now + LEADER_LEASE_SEC,
+                          "heartbeat": now_iso()}},
+                upsert=True, return_document=ReturnDocument.AFTER,
+            )
+            return bool(doc and doc.get("holder") == INSTANCE_ID)
+        except Exception:
+            # upsert lost the race -> a valid holder already exists -> we are a follower
+            return False
+
+    async def _connect_broker(self):
+        api_key = os.environ.get("ANGEL_API_KEY", "").strip()
+        client_code = os.environ.get("ANGEL_CLIENT_CODE", "").strip()
+        pin = os.environ.get("ANGEL_PIN", "").strip()
+        totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
+        if not all([api_key, client_code, pin, totp_secret]):
+            return {"connected": False, "error": "Missing Angel One credentials in .env"}
+        res = await asyncio.to_thread(self.broker.login, api_key, client_code, pin, totp_secret)
+        if res.get("connected"):
+            saved = self.settings.get("instrument_token")
+            if saved:
+                sel = self.broker.select_instrument(saved)
+                if sel.get("ok"):
+                    res["future"] = sel["symbol"]
+            self.feed_mode = "LIVE"
+            logger.info("Leader connected to Angel One; LIVE feed active")
+        return res
+
+    async def _on_become_leader(self):
+        logger.info("BECAME LEADER (%s)", INSTANCE_ID)
+        await self._load_state()      # pick up the latest state persisted by the previous leader
+        await self._connect_broker()  # only the leader holds an Angel session
+
+    async def _on_lose_leadership(self):
+        logger.info("LOST LEADERSHIP (%s) — disconnecting Angel", INSTANCE_ID)
+        try:
+            await asyncio.to_thread(self.broker.logout)
+        except Exception:
+            pass
+
+    async def _publish_snapshot(self):
+        """Leader writes the authoritative snapshot to Mongo so EVERY pod serves identical
+        /state (kills the cross-pod flicker)."""
+        try:
+            await self.db.live_state.replace_one(
+                {"_id": "singleton"},
+                {"_id": "singleton", "snapshot": self.snapshot(), "ts": time.time(),
+                 "leader": INSTANCE_ID},
+                upsert=True)
+        except Exception as e:
+            logger.warning("publish snapshot failed: %s", e)
+
+    async def _process_commands(self):
+        """Leader drains user actions relayed from any pod, executes them sequentially
+        (no order interleaving), and writes back the result."""
+        pending = await self.db.commands.find({"status": "pending"}).sort("created_ts", 1).to_list(20)
+        for c in pending:
+            claimed = await self.db.commands.find_one_and_update(
+                {"_id": c["_id"], "status": "pending"},
+                {"$set": {"status": "processing", "claimed_by": INSTANCE_ID}})
+            if not claimed:
+                continue
+            try:
+                result = await self._run_command(c["type"], c.get("payload") or {})
+            except Exception as e:
+                logger.exception("command %s failed", c.get("type"))
+                result = {"ok": False, "message": safe_err(str(e))}
+            await self.db.commands.update_one(
+                {"_id": c["_id"]}, {"$set": {"status": "done", "result": result, "done_at": now_iso()}})
+
+    async def _do_select_instrument(self, token):
+        res = self.broker.select_instrument(token)
+        if res.get("ok"):
+            self.settings["instrument_token"] = token
+            self.anchor = None
+            self.direction = 0
+            self.bricks = []
+            self.brick_seq = 0
+            self.consec_red = self.consec_green = self.down_run_reds = 0
+            await self._persist_state()
+        return res
+
+    async def _run_command(self, ctype, payload):
+        if ctype == "start":
+            self.running = True
+            await self._persist_state()
+            await self._on_start()
+            return {"running": True}
+        if ctype == "stop":
+            squared = False
+            if payload.get("square_off") and self.position and not self.pending_exit:
+                self._force_exit("MANUAL_SQUAREOFF")
+                squared = True
+            self.running = False
+            await self._persist_state()
+            return {"running": False, "squared_off": squared}
+        if ctype == "settings":
+            self.settings.update(payload.get("data") or {})
+            await self._persist_state()
+            return {"ok": True, "settings": self.settings, **self.settings}
+        if ctype == "adopt":
+            return await self.adopt_position(bool(payload.get("confirm")))
+        if ctype == "reconcile":
+            return await self.reconcile()
+        if ctype == "reconcile_resolve":
+            return await self.reconcile_resolve((payload.get("action") or "").lower())
+        if ctype == "manual_order":
+            return await self.manual_order((payload.get("side") or "").upper(), payload.get("qty"))
+        if ctype == "connect":
+            return await self._connect_broker()
+        if ctype == "disconnect":
+            await asyncio.to_thread(self.broker.logout)
+            return {"connected": False, "feed_mode": "LIVE"}
+        if ctype == "load_history":
+            return await self.load_history(days=int(payload.get("days", 5)),
+                                           from_date=payload.get("from_date"))
+        if ctype == "instruments":
+            if not self.broker.connected:
+                return {"ok": False, "error": "Connect Angel One first.", "items": []}
+            return {"ok": True, "items": self.broker.search_futures(payload.get("q", ""))}
+        if ctype == "select_instrument":
+            return await self._do_select_instrument(str(payload.get("token", "")))
+        if ctype == "reset":
+            self.reset()
+            await self.db.trades.delete_many({})
+            await self.db.order_log.delete_many({})
+            await self.db.engine_state.delete_one({"_id": "singleton"})
+            await self.load_metrics()
+            return {"ok": True}
+        if ctype == "square_off":
+            if not self.position:
+                return {"ok": False, "message": "No open position to square off."}
+            self._force_exit("MANUAL_SQUAREOFF")
+            return {"ok": True, "message": "Square-off order placed."}
+        if ctype == "arm":
+            self.breaker_tripped = False
+            self.day_key = datetime.now(IST).date().isoformat()
+            await self._persist_state()
+            return {"ok": True, "message": "Circuit breaker re-armed."}
+        if ctype == "clear_order_log":
+            res = await self.db.order_log.delete_many({})
+            self.orders = []
+            return {"ok": True, "cleared": res.deleted_count}
+        return {"ok": False, "message": f"Unknown command: {ctype}"}
+
     # -------- main loop --------
     # Ticks accumulate into a bar; the Renko bricks are evaluated ONLY on bar close
     # (every bar_seconds), using that bar's close price - just like TradingView 1m Renko.
     async def run_loop(self):
         while True:
             try:
+                leader = await self._acquire_leadership()
+                if leader and not self.is_leader:
+                    self.is_leader = True
+                    await self._on_become_leader()
+                elif not leader and self.is_leader:
+                    self.is_leader = False
+                    await self._on_lose_leadership()
+                self.is_leader = leader
+                if not self.is_leader:
+                    await asyncio.sleep(self.settings["tick_interval"])
+                    continue
+                await self._process_commands()
                 await self._refresh_broker_pnl()
                 if self.running:
                     if self._market_open():
@@ -1065,6 +1241,8 @@ class TradingEngine:
                     if self.persist_counter >= 15:
                         self.persist_counter = 0
                         asyncio.create_task(self._persist_state())
+                # leader publishes the authoritative snapshot every tick so all pods agree
+                await self._publish_snapshot()
             except Exception as e:
                 logger.exception("engine tick error: %s", e)
             await asyncio.sleep(self.settings["tick_interval"])
@@ -1122,6 +1300,8 @@ class TradingEngine:
         return {
             "running": self.running,
             "mode": self.mode,
+            "is_leader": self.is_leader,
+            "instance_id": INSTANCE_ID,
             "market_open": self._market_open(),
             "pending_adoption": self.pending_adoption,
             "feed_mode": self.feed_mode,
@@ -1167,6 +1347,25 @@ class TradingEngine:
 engine = TradingEngine(db)
 
 
+async def _relay(ctype, payload=None, timeout=12.0):
+    """Enqueue a user action for the leader pod to execute, then wait for its result.
+    This is how a read-only (follower) pod performs broker/trading actions safely."""
+    cmd_id = str(uuid.uuid4())
+    await db.commands.insert_one({
+        "_id": cmd_id, "type": ctype, "payload": payload or {},
+        "status": "pending", "created_at": now_iso(), "created_ts": time.time(),
+    })
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        doc = await db.commands.find_one({"_id": cmd_id})
+        if doc and doc.get("status") == "done":
+            await db.commands.delete_one({"_id": cmd_id})
+            return doc.get("result")
+        await asyncio.sleep(0.2)
+    await db.commands.delete_one({"_id": cmd_id})
+    return {"ok": False, "message": "No active trading pod handled this in time — please retry."}
+
+
 # ----------------------------- API -----------------------------
 class SettingsUpdate(BaseModel):
     brick_size: Optional[int] = Field(None, ge=1, le=2000)
@@ -1199,16 +1398,19 @@ async def root():
 
 @api_router.get("/state")
 async def get_state():
-    return engine.snapshot()
+    # Every pod serves the SAME state by reading the leader's published snapshot.
+    doc = await db.live_state.find_one({"_id": "singleton"})
+    if doc and doc.get("snapshot"):
+        snap = doc["snapshot"]
+        snap["leader_id"] = doc.get("leader")
+        snap["state_age_sec"] = round(time.time() - doc.get("ts", 0), 1)
+        return snap
+    return engine.snapshot()   # fallback before any leader has published
 
 
 @api_router.post("/bot/start")
 async def start_bot():
-    engine.running = True
-    await engine._persist_state()
-    # reconcile with Angel One (adopt a manual position if present), else enter-on-start
-    asyncio.create_task(engine._on_start())
-    return {"running": True}
+    return await _relay("start")
 
 
 class AdoptRequest(BaseModel):
@@ -1217,7 +1419,7 @@ class AdoptRequest(BaseModel):
 
 @api_router.post("/bot/adopt")
 async def adopt_position(req: AdoptRequest):
-    return await engine.adopt_position(req.confirm)
+    return await _relay("adopt", {"confirm": req.confirm})
 
 
 class StopRequest(BaseModel):
@@ -1226,58 +1428,38 @@ class StopRequest(BaseModel):
 
 @api_router.post("/bot/stop")
 async def stop_bot(req: StopRequest = StopRequest()):
-    squared = False
-    if req.square_off and engine.position and not engine.pending_exit:
-        engine._force_exit("MANUAL_SQUAREOFF")  # force-cover open position before halting
-        squared = True
-    engine.running = False
-    await engine._persist_state()
-    return {"running": False, "squared_off": squared}
+    return await _relay("stop", {"square_off": bool(req.square_off)})
 
 
 @api_router.post("/bot/reset")
 async def reset_bot():
-    engine.reset()
-    await db.trades.delete_many({})
-    await db.order_log.delete_many({})
-    await db.engine_state.delete_one({"_id": "singleton"})
-    await engine.load_metrics()
-    return {"ok": True}
+    return await _relay("reset")
 
 
 @api_router.post("/bot/square-off")
 async def square_off():
-    if not engine.position:
-        return {"ok": False, "message": "No open position to square off."}
-    engine._force_exit("MANUAL_SQUAREOFF")
-    return {"ok": True, "message": "Square-off order placed (demo)."}
+    return await _relay("square_off")
 
 
 @api_router.post("/bot/trade-mode")
 async def set_trade_mode(body: dict):
     # LIVE-only app: mode is always LIVE (real money). Kept for backward compatibility.
-    engine.mode = "LIVE"
     return {"ok": True, "mode": "LIVE"}
 
 
 @api_router.get("/bot/reconcile")
 async def get_reconcile():
-    return await engine.reconcile()
+    return await _relay("reconcile")
 
 
 @api_router.post("/bot/reconcile/resolve")
 async def post_reconcile_resolve(body: dict):
-    action = (body.get("action") or "").lower()
-    return await engine.reconcile_resolve(action)
+    return await _relay("reconcile_resolve", {"action": (body.get("action") or "").lower()})
 
 
 @api_router.post("/bot/arm")
 async def arm_breaker():
-    # Manually re-arm the circuit breaker (clears the tripped state).
-    engine.breaker_tripped = False
-    engine.day_key = datetime.now(IST).date().isoformat()
-    await engine._persist_state()
-    return {"ok": True, "message": "Circuit breaker re-armed."}
+    return await _relay("arm")
 
 
 @api_router.get("/trades")
@@ -1293,11 +1475,7 @@ async def get_order_log():
 
 @api_router.post("/orders/log/clear")
 async def clear_order_log():
-    """Clear historical order-log rows (e.g. old rejections). Does NOT touch any open
-    position, trades, or broker state — purely cleans the display log."""
-    res = await db.order_log.delete_many({})
-    engine.orders = []
-    return {"ok": True, "cleared": res.deleted_count}
+    return await _relay("clear_order_log")
 
 
 @api_router.post("/orders/manual")
@@ -1305,85 +1483,46 @@ async def post_manual_order(body: dict):
     side = (body.get("side") or "").upper()
     if side not in ("BUY", "SELL"):
         return {"ok": False, "message": "side must be BUY or SELL"}
-    return await engine.manual_order(side, body.get("qty"))
+    return await _relay("manual_order", {"side": side, "qty": body.get("qty")})
 
 
 @api_router.post("/settings")
 async def update_settings(body: SettingsUpdate):
     data = body.model_dump(exclude_none=True)
-    engine.settings.update(data)
-    await engine._persist_state()   # persist so settings survive restarts
-    return engine.settings
+    return await _relay("settings", {"data": data})
 
 
 @api_router.post("/angel/connect")
 async def angel_connect():
-    """Log in to Angel One using credentials from backend .env and switch the
-    price feed to LIVE. Orders still stay in PAPER/DEMO mode (no real orders)."""
-    api_key = os.environ.get("ANGEL_API_KEY", "").strip()
-    client_code = os.environ.get("ANGEL_CLIENT_CODE", "").strip()
-    pin = os.environ.get("ANGEL_PIN", "").strip()
-    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
-    missing = [k for k, v in {
-        "ANGEL_API_KEY": api_key, "ANGEL_CLIENT_CODE": client_code,
-        "ANGEL_PIN": pin, "ANGEL_TOTP_SECRET": totp_secret}.items() if not v]
-    if missing:
-        return {"connected": False, "error": f"Missing credentials in .env: {', '.join(missing)}"}
-    res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
-    if res.get("connected"):
-        saved = engine.settings.get("instrument_token")
-        if saved:
-            sel = engine.broker.select_instrument(saved)
-            if sel.get("ok"):
-                res["future"] = sel["symbol"]
-        engine.feed_mode = "LIVE"
-        await engine._persist_state()
-    return res
+    """Ask the leader pod to log in to Angel One using credentials from backend .env."""
+    return await _relay("connect", timeout=25.0)
 
 
 @api_router.post("/angel/disconnect")
 async def angel_disconnect():
-    await asyncio.to_thread(engine.broker.logout)
-    await engine._persist_state()
-    return {"connected": False, "feed_mode": "LIVE"}
+    return await _relay("disconnect")
 
 
 @api_router.post("/angel/load-history")
 async def angel_load_history(body: dict = None):
     body = body or {}
-    from_date = body.get("from_date")
-    days = int(body.get("days", 5))
-    days = max(1, min(days, 70))
-    return await engine.load_history(days=days, from_date=from_date)
+    days = max(1, min(int(body.get("days", 5)), 70))
+    return await _relay("load_history", {"days": days, "from_date": body.get("from_date")}, timeout=45.0)
 
 
 @api_router.get("/angel/instruments")
 async def angel_instruments(q: str = ""):
-    if not engine.broker.connected:
-        return {"ok": False, "error": "Connect Angel One first.", "items": []}
-    return {"ok": True, "items": engine.broker.search_futures(q)}
+    return await _relay("instruments", {"q": q})
 
 
 @api_router.post("/angel/select-instrument")
 async def angel_select_instrument(body: dict):
-    token = str(body.get("token", ""))
-    res = engine.broker.select_instrument(token)
-    if res.get("ok"):
-        engine.settings["instrument_token"] = token
-        # switching contract -> reset the renko chart for the new price series
-        engine.anchor = None
-        engine.direction = 0
-        engine.bricks = []
-        engine.brick_seq = 0
-        engine.consec_red = engine.consec_green = engine.down_run_reds = 0
-        await engine._persist_state()
-    return res
+    return await _relay("select_instrument", {"token": str(body.get("token", ""))})
 
 
 @api_router.post("/feed/mode")
 async def set_feed_mode(body: dict):
     # LIVE-only app: feed is always real Angel One data. Kept for backward compatibility.
-    engine.feed_mode = "LIVE"
     return {"ok": True, "feed_mode": "LIVE"}
 
 
@@ -1400,28 +1539,13 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    await db.leader_lock.update_one(
+        {"_id": "trading_engine"},
+        {"$setOnInsert": {"holder": "", "expires_at": 0}}, upsert=True)
     await engine.load_metrics()
     await engine._load_state()   # crash/restart recovery
     asyncio.create_task(engine.run_loop())
-    asyncio.create_task(_auto_connect_angel())   # resume LIVE feed after a restart
-    logger.info("Trading engine started")
-
-
-async def _auto_connect_angel():
-    """If Angel creds exist in env, auto-login on boot so a LIVE session survives restarts."""
-    api_key = os.environ.get("ANGEL_API_KEY", "").strip()
-    client_code = os.environ.get("ANGEL_CLIENT_CODE", "").strip()
-    pin = os.environ.get("ANGEL_PIN", "").strip()
-    totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
-    if not all([api_key, client_code, pin, totp_secret]):
-        return
-    res = await asyncio.to_thread(engine.broker.login, api_key, client_code, pin, totp_secret)
-    if res.get("connected"):
-        saved = engine.settings.get("instrument_token")
-        if saved:
-            engine.broker.select_instrument(saved)   # restore user's chosen contract
-        engine.feed_mode = "LIVE"
-        logger.info("Angel One connected on boot; LIVE feed active")
+    logger.info("Trading engine started (instance %s)", INSTANCE_ID)
 
 
 @app.on_event("shutdown")

@@ -47,20 +47,36 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
-- LIVE MARKET DATA FEED (July 2026): migrated from per-second REST `ltpData` polling to
-  **SmartWebSocketV2 streaming** (`angel_broker.start_feed`, daemon thread, LTP mode,
-  exchangeType=2 NFO). Root cause of "no bricks": Angel One `position()` endpoint is capped
-  at 1 req/sec and shares throttle budget; per-tick polling starved the feed. Now:
-  * `get_ltp()` returns the streamed LTP (fresh < FEED_STALE_SEC=15s), else falls back to
-    REST `_get_ltp_rest()` (which also auto-relogins + restarts the feed with new tokens).
-  * jwt from generateSession must strip "Bearer " prefix; feedToken captured at login.
-  * on_data LTP is in paise → /100. Re-subscribes on expiry rollover (`_ensure_subscription`).
-  * status() exposes `streaming` + `feed_ltp`. UI badge shows "Streaming" when live.
-  * Verified in preview: feed_ltp streamed live (24117→24108→24107). Could NOT e2e-test a
-    RUNNING bot (would place a real order) — engine loop unchanged, still calls get_ltp().
-- P&L polling: position() fetched every 20s and only when running/holding (well under 1/sec).
-- Market-open safety reconcile: once/day, after brick-building, error-guarded.
-- Alerts expire from /api/state after ALERT_TTL_SEC=20 (stop repeating toasts on mobile).
+- MULTI-POD SAFE ARCHITECTURE (July 2026): Emergent production runs MULTIPLE backend
+  pods (support confirmed single-pod is NOT supported). The bot was re-architected so
+  only ONE pod trades:
+  * **Leader election** via MongoDB `leader_lock` (`_id: trading_engine`, atomic
+    find_one_and_update lease, LEADER_LEASE_SEC=15, renewed each loop tick). Each process
+    has a module-level `INSTANCE_ID`. Only the leader: connects Angel One, runs the strategy
+    loop, and places ANY order. Followers idle (no broker session, no trading) → NO duplicate
+    real orders even across pods/restarts.
+  * **Single source of truth**: leader writes full snapshot to `db.live_state` every tick;
+    ALL pods answer `/api/state` by reading it (kills the 15000↔10000 & Start/Stop flicker).
+    `/state` also returns `is_leader`, `leader_id`, `state_age_sec`.
+  * **Command relay**: mutating/broker endpoints (start, stop, settings, adopt, reconcile,
+    reconcile_resolve, manual_order, connect, disconnect, load_history, instruments,
+    select_instrument, reset, square_off, arm, clear_order_log) enqueue a doc in `db.commands`;
+    the leader executes it sequentially (no order interleaving) and writes back the result,
+    which `_relay()` polls (~0.2s) and returns. Adds ~1-2s to actions. `/trades` & `/orders/log`
+    stay direct DB reads.
+  * Boot auto-connect REMOVED; leader connects on `_on_become_leader` (also `_load_state`);
+    `_on_lose_leadership` logs out so only one Angel session exists (fixes invalid-token/
+    rate-limit from multiple sessions).
+  * UI: top-bar red "Trading pod idle" badge shows when `state_age_sec > 30` (no active leader).
+  * VERIFIED (single-pod preview): leadership acquired, /state consistent (age 0), relay works
+    for settings/reconcile/instruments. NOT tested: start/manual_order/square_off (real money).
+    Full multi-pod validation happens on production after redeploy.
+- ⚠️ IDLE-POD RISK: if the pod sleeps with zero traffic, the leader loop stops (no trading,
+  no exit monitoring). Mitigation: keep the dashboard tab open during market hours (polls
+  /state every 1s = keep-alive), OR run an external keep-alive (Azure VM cron hitting
+  /api/state every ~30s during 09:15-15:30 IST). RECOMMENDED FOLLOW-UP: order idempotency
+  keys (persist client-order-id before broker call) to close the narrow leader-failover window.
+- LIVE MARKET DATA FEED: SmartWebSocketV2 streaming (leader only); get_ltp falls back to REST.
 - LIVE REAL MONEY ONLY. Never place/modify/cancel orders or Start the bot without
   explicit user consent.
 - Production env vars are managed separately from preview .env; code fixes need a

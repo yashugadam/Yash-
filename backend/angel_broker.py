@@ -297,11 +297,11 @@ class AngelBroker:
             except Exception as e:
                 logger.warning("WS on_data parse error: %s", e)
 
-        def on_error(wsapp, error):
+        def on_error(wsapp, *args):
             self.feed_connected = False
-            logger.warning("WS error: %s", error)
+            logger.warning("WS error: %s", args[0] if args else "")
 
-        def on_close(wsapp):
+        def on_close(wsapp, *args):
             self.feed_connected = False
             logger.info("WS closed")
 

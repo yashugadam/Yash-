@@ -266,6 +266,11 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-2">
+          {typeof state.state_age_sec === "number" && state.state_age_sec > 30 && (
+            <span className="bg-red-600 text-white border border-red-700 px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 animate-pulse" data-testid="stale-state-badge" title="No active trading pod has updated the state recently. The bot may not be actively monitoring the market. Keep this tab open during market hours.">
+              <AlertTriangle className="h-3 w-3" /> Trading pod idle
+            </span>
+          )}
           <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.angel?.connected ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-red-100 text-red-700 border-red-200"}`} data-testid="feed-badge" title={state.angel?.streaming ? "Live LTP streaming over websocket" : (state.feed_error || "")}>
             <Activity className="h-3 w-3" /> {state.angel?.connected ? (state.angel?.streaming ? "Streaming" : "Live Data") : "Disconnected"}
           </span>
