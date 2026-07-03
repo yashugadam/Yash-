@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import {
   Activity, Play, Square, RotateCcw, Settings as SettingsIcon, TrendingDown,
   Zap, ShieldCheck, ChevronUp, ChevronDown, Layers, Lock, Save,
-  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History, Search,
+  CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History, Search, LogOut,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
 import {
@@ -32,7 +32,7 @@ const Widget = ({ title, icon, children, right, testid }) => (
   </div>
 );
 
-export default function Dashboard() {
+export default function Dashboard({ onLogout }) {
   const [state, setState] = useState(null);
   const [trades, setTrades] = useState([]);
   const [form, setForm] = useState(null);
@@ -285,6 +285,9 @@ export default function Dashboard() {
           </span>
           <button onClick={reset} className="border border-slate-300 hover:bg-slate-50 text-slate-600 px-3 py-1.5 transition-colors" data-testid="reset-button" title="Reset session">
             <RotateCcw className="h-3.5 w-3.5" />
+          </button>
+          <button onClick={onLogout} className="border border-slate-300 hover:bg-slate-50 text-slate-600 px-3 py-1.5 transition-colors" data-testid="logout-button" title="Log out">
+            <LogOut className="h-3.5 w-3.5" />
           </button>
           <button onClick={startStop} data-testid="start-stop-button"
             className={`font-mono uppercase text-xs tracking-wider px-4 py-1.5 transition-colors flex items-center gap-2 text-white ${state.running ? "bg-red-600 hover:bg-red-700" : "bg-emerald-600 hover:bg-emerald-700"}`}>

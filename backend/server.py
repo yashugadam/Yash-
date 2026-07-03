@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request, HTTPException
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -8,6 +9,9 @@ import asyncio
 import time
 import calendar
 import logging
+import hmac
+import bcrypt
+import jwt as pyjwt
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -54,6 +58,52 @@ LEADER_LEASE_SEC = 15
 # Transient alerts are served in /api/state only for this window, then dropped —
 # so an old toast can't re-fire indefinitely on mobile tab-resume / remounts.
 ALERT_TTL_SEC = 20
+
+# ---- authentication (single-user JWT) ----
+# The live trading API must not be open to the public internet. A single user (from .env)
+# logs in; a signed JWT then gates every /api route except the public login + keepalive.
+JWT_ALGORITHM = "HS256"
+JWT_TTL_HOURS = 12
+AUTH_PUBLIC_PATHS = {"/api/auth/login", "/api/keepalive"}
+
+
+def _jwt_secret():
+    return os.environ["JWT_SECRET"]
+
+
+def _hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def _create_token(username: str) -> str:
+    payload = {"sub": username, "type": "access",
+               "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_TTL_HOURS)}
+    return pyjwt.encode(payload, _jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def _decode_token(token: str):
+    try:
+        payload = pyjwt.decode(token, _jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _bearer_token(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return None
+
 
 
 def now_iso():
@@ -1442,24 +1492,36 @@ async def root():
     return {"message": "Renko Algo Trading Bot API"}
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@api_router.post("/auth/login")
+async def auth_login(body: LoginRequest):
+    user = await db.auth_user.find_one({"_id": "singleton"})
+    ok = bool(user) and hmac.compare_digest((body.username or "").strip(), user.get("username", "")) \
+        and _verify_password(body.password or "", user.get("password_hash", ""))
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"token": _create_token(user["username"]), "username": user["username"]}
+
+
+@api_router.get("/auth/me")
+async def auth_me(request: Request):
+    token = _bearer_token(request)
+    payload = _decode_token(token) if token else None
+    if not payload:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"username": payload.get("sub")}
+
+
 @api_router.get("/keepalive")
 async def keepalive():
-    """Lightweight endpoint for an external scheduler (e.g. an Azure VM cron) to ping every
-    ~30s during market hours. Regular traffic keeps a pod awake so the leader's strategy loop
-    keeps running even when no dashboard/browser is open."""
-    doc = await db.live_state.find_one({"_id": "singleton"}, {"snapshot.running": 1,
-                                        "snapshot.market_open": 1, "snapshot.position": 1,
-                                        "ts": 1, "leader": 1})
-    snap = (doc or {}).get("snapshot", {}) if doc else {}
-    return {
-        "ok": True,
-        "server_time": now_iso(),
-        "leader": (doc or {}).get("leader"),
-        "state_age_sec": round(time.time() - (doc or {}).get("ts", 0), 1) if doc else None,
-        "running": snap.get("running"),
-        "market_open": snap.get("market_open"),
-        "has_position": bool(snap.get("position")),
-    }
+    """PUBLIC, minimal endpoint for an external scheduler to ping (~1/min) so a pod stays
+    warm and the leader loop keeps trading even with no browser open. Intentionally returns
+    NO sensitive data (it's unauthenticated)."""
+    return {"ok": True, "server_time": now_iso()}
 
 
 @api_router.get("/state")
@@ -1603,6 +1665,35 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    """Require a valid JWT for every /api route except the public login + keepalive.
+    Non-/api paths and CORS preflight (OPTIONS) pass through untouched."""
+    path = request.url.path
+    if request.method == "OPTIONS" or not path.startswith("/api") or path in AUTH_PUBLIC_PATHS:
+        return await call_next(request)
+    token = _bearer_token(request)
+    if not token or not _decode_token(token):
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    return await call_next(request)
+
+
+async def _seed_auth_user():
+    """Create/refresh the single login user from .env (username + bcrypt-hashed password)."""
+    username = os.environ.get("AUTH_USERNAME", "").strip()
+    password = os.environ.get("AUTH_PASSWORD", "")
+    if not username or not password:
+        logger.warning("AUTH_USERNAME/AUTH_PASSWORD not set — login will not work.")
+        return
+    existing = await db.auth_user.find_one({"_id": "singleton"})
+    if not existing:
+        await db.auth_user.insert_one(
+            {"_id": "singleton", "username": username, "password_hash": _hash_password(password)})
+    elif existing.get("username") != username or not _verify_password(password, existing.get("password_hash", "")):
+        await db.auth_user.update_one({"_id": "singleton"},
+            {"$set": {"username": username, "password_hash": _hash_password(password)}})
+
+
 @app.on_event("startup")
 async def startup():
     await db.leader_lock.update_one(
@@ -1612,6 +1703,7 @@ async def startup():
         await db.order_keys.create_index("created", expireAfterSeconds=172800)  # auto-expire keys after 2 days
     except Exception:
         pass
+    await _seed_auth_user()
     await engine.load_metrics()
     await engine._load_state()   # crash/restart recovery
     asyncio.create_task(engine.run_loop())

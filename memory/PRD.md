@@ -47,6 +47,14 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
+- AUTHENTICATION (July 2026, SEC-001 FIXED): single-user JWT login. Creds in backend `.env`
+  (`AUTH_USERNAME`, `AUTH_PASSWORD`, `JWT_SECRET`); seeded to Mongo `auth_user` (`_id: singleton`,
+  bcrypt hash) on startup. `POST /api/auth/login` -> `{token}` (HS256, 12h); `GET /api/auth/me`.
+  Middleware `auth_gate` requires `Authorization: Bearer` on EVERY /api route except public
+  `/api/auth/login` + `/api/keepalive`. Frontend `Login.js` + `App.js` gate (token in
+  localStorage, axios default header, 401->logout), logout button in Dashboard header.
+  `/api/keepalive` stripped to `{ok, server_time}` (public, no sensitive data).
+  Login user in /app/memory/test_credentials.md.
 - MULTI-POD SAFE ARCHITECTURE (July 2026): Emergent production runs MULTIPLE backend
   pods (support confirmed single-pod is NOT supported). The bot was re-architected so
   only ONE pod trades:
