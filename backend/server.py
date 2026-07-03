@@ -308,6 +308,28 @@ class TradingEngine:
                 return ltp
         return self.price
 
+    def _order_key(self, kind, reason, brick_index):
+        """Deterministic client order id. A brick-triggered signal (ENTRY / green-brick EXIT)
+        fires exactly once for a given brick, so two pods computing it produce the SAME key ->
+        the duplicate is suppressed. Retries / forced exits (no brick) use an 8s dedup window,
+        so a genuine sequential retry (>=15s later) still goes through."""
+        today = datetime.now(IST).date().isoformat()
+        if brick_index is not None and brick_index >= 0:
+            return f"{kind}:{today}:b{brick_index}"
+        return f"{kind}:{reason}:{today}:t{int(time.time() // 8)}"
+
+    async def _claim_order_key(self, key):
+        """Persist the client order id BEFORE the broker call. Returns True if this order may
+        be placed, False if it was already placed (prevents duplicate REAL orders across pods
+        / restarts / leader-failover)."""
+        try:
+            await self.db.order_keys.insert_one(
+                {"_id": key, "created": datetime.now(timezone.utc), "by": INSTANCE_ID})
+            return True
+        except Exception:
+            logger.warning("Idempotency guard: order key exists, suppressing duplicate -> %s", key)
+            return False
+
     async def _execute_order(self, side, kind, ref_price, brick_index, reason="SIGNAL"):
         # Duplicate-order protection: only one order in-flight; re-validate inside the lock.
         async with self.order_lock:
@@ -358,6 +380,22 @@ class TradingEngine:
                     self.exit_retry_pending = True
                 self._set_alert("Order NOT placed — Angel One disconnected. Auto-reconnecting; "
                                 "will retry.", "error")
+                asyncio.create_task(self._save_order(order))
+                asyncio.create_task(self._persist_state())
+                return
+
+            # Idempotency: persist a deterministic client order id BEFORE the broker call.
+            # If it already exists (a leader-failover race placed it), suppress the duplicate.
+            okey = self._order_key(kind, reason, brick_index)
+            order["client_order_id"] = okey
+            if not await self._claim_order_key(okey):
+                order["status"] = "SKIPPED_DUPLICATE"
+                order["note"] = "Duplicate suppressed by idempotency guard (order already placed)."
+                if kind == "ENTRY":
+                    self.pending_entry = False
+                else:
+                    self.pending_exit = False
+                    self.exit_retry_pending = True   # keep the position exitable next window
                 asyncio.create_task(self._save_order(order))
                 asyncio.create_task(self._persist_state())
                 return
@@ -539,6 +577,14 @@ class TradingEngine:
         }
         self.orders.insert(0, order)
         self.orders = self.orders[:60]
+        # Idempotency: guard against a double-submit / cross-pod duplicate (5s window).
+        mkey = f"MANUAL:{side}:{datetime.now(IST).date().isoformat()}:t{int(time.time() // 5)}"
+        order["client_order_id"] = mkey
+        if not await self._claim_order_key(mkey):
+            order["status"] = "SKIPPED_DUPLICATE"
+            order["note"] = "Duplicate manual order suppressed (already placed just now)."
+            asyncio.create_task(self._save_order(order))
+            return {"ok": False, "message": "Duplicate manual order suppressed (already placed just now)."}
         res = await asyncio.to_thread(self.broker.place_limit_order, side, limit, qty)
         if not res.get("ok"):
             order["status"] = "REJECTED"
@@ -1396,6 +1442,26 @@ async def root():
     return {"message": "Renko Algo Trading Bot API"}
 
 
+@api_router.get("/keepalive")
+async def keepalive():
+    """Lightweight endpoint for an external scheduler (e.g. an Azure VM cron) to ping every
+    ~30s during market hours. Regular traffic keeps a pod awake so the leader's strategy loop
+    keeps running even when no dashboard/browser is open."""
+    doc = await db.live_state.find_one({"_id": "singleton"}, {"snapshot.running": 1,
+                                        "snapshot.market_open": 1, "snapshot.position": 1,
+                                        "ts": 1, "leader": 1})
+    snap = (doc or {}).get("snapshot", {}) if doc else {}
+    return {
+        "ok": True,
+        "server_time": now_iso(),
+        "leader": (doc or {}).get("leader"),
+        "state_age_sec": round(time.time() - (doc or {}).get("ts", 0), 1) if doc else None,
+        "running": snap.get("running"),
+        "market_open": snap.get("market_open"),
+        "has_position": bool(snap.get("position")),
+    }
+
+
 @api_router.get("/state")
 async def get_state():
     # Every pod serves the SAME state by reading the leader's published snapshot.
@@ -1542,6 +1608,10 @@ async def startup():
     await db.leader_lock.update_one(
         {"_id": "trading_engine"},
         {"$setOnInsert": {"holder": "", "expires_at": 0}}, upsert=True)
+    try:
+        await db.order_keys.create_index("created", expireAfterSeconds=172800)  # auto-expire keys after 2 days
+    except Exception:
+        pass
     await engine.load_metrics()
     await engine._load_state()   # crash/restart recovery
     asyncio.create_task(engine.run_loop())

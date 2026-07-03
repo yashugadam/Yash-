@@ -68,6 +68,14 @@ green; >4 reds → wait for 2 greens.
     `_on_lose_leadership` logs out so only one Angel session exists (fixes invalid-token/
     rate-limit from multiple sessions).
   * UI: top-bar red "Trading pod idle" badge shows when `state_age_sec > 30` (no active leader).
+  * ORDER IDEMPOTENCY (July 2026): `_execute_order` + `manual_order` persist a deterministic
+    client order id to `db.order_keys` (unique `_id`) BEFORE the broker call; if it already
+    exists the duplicate is suppressed. Brick-triggered signals key on date+brick index (fire
+    once); retries/forced/manual use short time-buckets (8s/5s) so genuine sequential retries
+    still go through. TTL index expires keys after 2 days. Closes the leader-failover window.
+  * KEEP-ALIVE: `GET /api/keepalive` (cheap) is pinged by an external scheduler (user's Azure
+    VM cron, every ~30s) so a pod stays warm and the leader loop keeps trading even with NO
+    browser open (user is on mobile, can't keep a tab open). Returns leader/state_age/running.
   * VERIFIED (single-pod preview): leadership acquired, /state consistent (age 0), relay works
     for settings/reconcile/instruments. NOT tested: start/manual_order/square_off (real money).
     Full multi-pod validation happens on production after redeploy.
