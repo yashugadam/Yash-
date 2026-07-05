@@ -313,51 +313,10 @@ class TradingEngine:
                 "symbol": self.broker.fut_symbol}
 
     # -------- strategy backtest (simulation-only: real historical candles, NO orders) --------
-    async def backtest(self, from_date=None, to_date=None, brick_size=None, days=30):
-        """Replay real Angel One 1-min candles through the EXACT live Renko + entry/exit rules
-        and report performance. Pure simulation — never places an order or mutates live state.
-        Fills use brick-close prices (idealized: excludes slippage/brokerage)."""
-        if not self.broker.connected:
-            return {"ok": False, "error": "Connect Angel One first."}
-        bs = int(brick_size or self.settings["brick_size"])
-        if bs <= 0:
-            return {"ok": False, "error": "brick_size must be positive"}
-        lot = self.settings["lot_size"]
-        max_red_single_green = self.settings["max_red_single_green"]
-        greens_ext = self.settings["greens_to_exit_extended"]
-        now = datetime.now(IST)
-        try:
-            start = datetime.strptime(from_date, "%Y-%m-%d").replace(hour=9, minute=15, tzinfo=IST) \
-                if from_date else (now - timedelta(days=int(days))).replace(hour=9, minute=15)
-        except Exception:
-            return {"ok": False, "error": "Bad from_date (use YYYY-MM-DD)"}
-        end = now
-        if to_date:
-            try:
-                end = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=15, minute=30, tzinfo=IST)
-            except Exception:
-                return {"ok": False, "error": "Bad to_date (use YYYY-MM-DD)"}
-        if end <= start:
-            return {"ok": False, "error": "to_date must be after from_date"}
-        if (end - start).days > 70:
-            start = end - timedelta(days=70)   # Angel history sanity cap
+    NIFTY_INDEX_TOKEN = "99926000"   # NIFTY 50 index (NSE) — continuous multi-year 1-min history
 
-        all_candles, seen, cur, calls = [], set(), start, 0
-        while cur < end and calls < 40:
-            chunk_end = min(cur + timedelta(days=4), end)
-            candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE",
-                          cur.strftime("%Y-%m-%d %H:%M"), chunk_end.strftime("%Y-%m-%d %H:%M"))
-            calls += 1
-            if candles:
-                for c in candles:
-                    if c[0] not in seen:
-                        seen.add(c[0]); all_candles.append(c)
-            cur = chunk_end + timedelta(minutes=1)
-            await asyncio.sleep(0.4)
-        if not all_candles:
-            return {"ok": False, "error": self.broker.error or "No historical candles returned"}
-        all_candles.sort(key=lambda c: c[0])
-
+    def _simulate(self, candles, bs, lot, max_red_single_green, greens_ext):
+        """Replay candle closes through the EXACT live Renko + entry/exit rules for one brick size."""
         anchor = {"v": None}; direction = {"v": 0}; seq = {"v": 0}
 
         def bricks_from_close(price, ts):
@@ -375,16 +334,14 @@ class TradingEngine:
                     return out
                 count = abs(n) - 1; anchor["v"] += s * bs
             for _ in range(count):
-                o = anchor["v"]; c2 = anchor["v"] + s * bs; anchor["v"] = c2; direction["v"] = s
-                seq["v"] += 1
-                out.append({"index": seq["v"], "color": "green" if s > 0 else "red",
-                            "close": round(c2, 2), "time": ts})
+                c2 = anchor["v"] + s * bs; anchor["v"] = c2; direction["v"] = s; seq["v"] += 1
+                out.append({"color": "green" if s > 0 else "red", "close": round(c2, 2), "time": ts})
             return out
 
         consec_red = consec_green = down_run_reds = 0
         position = None; trades = []
         equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
-        for c in all_candles:
+        for c in candles:
             for b in bricks_from_close(float(c[4]), c[0]):
                 if b["color"] == "red":
                     consec_red += 1; consec_green = 0
@@ -413,22 +370,92 @@ class TradingEngine:
         n = len(trades)
         net = round(sum(t["pnl"] for t in trades), 2)
         summary = {
-            "trades": n, "wins": wins, "losses": n - wins,
+            "brick_size": bs, "trades": n, "wins": wins, "losses": n - wins,
             "win_rate": round(100 * wins / n, 1) if n else 0.0,
             "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
             "avg_pnl": round(net / n, 2) if n else 0.0,
             "best": round(max((t["pnl"] for t in trades), default=0.0), 2),
             "worst": round(min((t["pnl"] for t in trades), default=0.0), 2),
             "profit_factor": round(gross_win / abs(gross_loss), 2) if gross_loss else None,
-            "max_drawdown": round(max_dd, 2),
-            "candles": len(all_candles), "open_position": bool(position),
+            "max_drawdown": round(max_dd, 2), "open_position": bool(position),
         }
-        return {"ok": True, "summary": summary, "trades": trades[-1000:],
-                "params": {"brick_size": bs, "lot_size": lot,
-                           "max_red_single_green": max_red_single_green,
-                           "greens_to_exit_extended": greens_ext,
-                           "from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d"),
-                           "symbol": self.broker.fut_symbol}}
+        return summary, trades
+
+    async def backtest(self, from_date=None, to_date=None, brick_size=None,
+                       brick_sizes=None, days=30, source="future"):
+        """Simulation-only backtest — never places an order or mutates live state. Fills use
+        brick-close prices (excludes slippage/brokerage). source='index' uses the NIFTY 50 index
+        (continuous multi-year 1-min history) as a proxy; 'future' uses the selected contract
+        (limited to that contract's lifespan). Pass brick_sizes=[30,40,50] to sweep and compare."""
+        if not self.broker.connected:
+            return {"ok": False, "error": "Connect Angel One first."}
+        lot = self.settings["lot_size"]
+        max_red = self.settings["max_red_single_green"]
+        greens_ext = self.settings["greens_to_exit_extended"]
+        bricks = [int(b) for b in (brick_sizes or [brick_size or self.settings["brick_size"]]) if int(b) > 0]
+        if not bricks:
+            return {"ok": False, "error": "No valid brick size"}
+        now = datetime.now(IST)
+        try:
+            start = datetime.strptime(from_date, "%Y-%m-%d").replace(hour=9, minute=15, tzinfo=IST) \
+                if from_date else (now - timedelta(days=int(days))).replace(hour=9, minute=15)
+        except Exception:
+            return {"ok": False, "error": "Bad from_date (use YYYY-MM-DD)"}
+        end = now
+        if to_date:
+            try:
+                end = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=15, minute=30, tzinfo=IST)
+            except Exception:
+                return {"ok": False, "error": "Bad to_date (use YYYY-MM-DD)"}
+        if end <= start:
+            return {"ok": False, "error": "to_date must be after from_date"}
+        use_index = (source == "index")
+        max_days = 760 if use_index else 70     # index has long history; a future does not
+        if (end - start).days > max_days:
+            start = end - timedelta(days=max_days)
+        exch = "NSE" if use_index else None
+        token = self.NIFTY_INDEX_TOKEN if use_index else None
+        symbol = "NIFTY 50 (index)" if use_index else self.broker.fut_symbol
+
+        # fetch candles once (Angel caps 1-min history per request → paginate in ~25-day chunks)
+        all_candles, seen, cur, calls = [], set(), start, 0
+        while cur < end and calls < 70:
+            chunk_end = min(cur + timedelta(days=25), end)
+            candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE",
+                          cur.strftime("%Y-%m-%d %H:%M"), chunk_end.strftime("%Y-%m-%d %H:%M"),
+                          exch, token)
+            calls += 1
+            if candles:
+                for c in candles:
+                    if c[0] not in seen:
+                        seen.add(c[0]); all_candles.append(c)
+            cur = chunk_end + timedelta(minutes=1)
+            await asyncio.sleep(0.35)
+        if not all_candles:
+            return {"ok": False, "error": self.broker.error or "No historical candles returned"}
+        all_candles.sort(key=lambda c: c[0])
+
+        results = []
+        best_trades = None
+        for bs in bricks:
+            summary, trades = self._simulate(all_candles, bs, lot, max_red, greens_ext)
+            results.append(summary)
+            if best_trades is None or summary["net_pnl"] > best_trades[0]["net_pnl"]:
+                best_trades = (summary, trades)
+        best_bs = max(results, key=lambda r: r["net_pnl"])["brick_size"] if results else None
+        params = {"lot_size": lot, "max_red_single_green": max_red,
+                  "greens_to_exit_extended": greens_ext, "source": source, "symbol": symbol,
+                  "from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d"),
+                  "candles": len(all_candles)}
+        if len(bricks) == 1:
+            # single-brick: keep the original shape (summary + trades) for the simple view
+            summary, trades = best_trades
+            return {"ok": True, "summary": summary, "trades": trades[-1000:],
+                    "params": {**params, "brick_size": bricks[0]}}
+        # sweep: comparison table + trades/equity of the best brick size
+        summary, trades = best_trades
+        return {"ok": True, "sweep": results, "best_brick_size": best_bs,
+                "best_summary": summary, "best_trades": trades[-1000:], "params": params}
 
 
     def _new_brick(self, color, o, c, ts=None):
@@ -1288,6 +1315,11 @@ class TradingEngine:
                 {"$set": {"status": "processing", "claimed_by": INSTANCE_ID}})
             if not claimed:
                 continue
+            # backtest can run for many seconds (fetching years of candles) — run it in the
+            # background so it NEVER pauses the live trading loop. It's read-only (no orders).
+            if c["type"] == "backtest":
+                asyncio.create_task(self._run_command_bg(c))
+                continue
             try:
                 result = await self._run_command(c["type"], c.get("payload") or {})
             except Exception as e:
@@ -1295,6 +1327,15 @@ class TradingEngine:
                 result = {"ok": False, "message": safe_err(str(e))}
             await self.db.commands.update_one(
                 {"_id": c["_id"]}, {"$set": {"status": "done", "result": result, "done_at": now_iso()}})
+
+    async def _run_command_bg(self, c):
+        try:
+            result = await self._run_command(c["type"], c.get("payload") or {})
+        except Exception as e:
+            logger.exception("bg command %s failed", c.get("type"))
+            result = {"ok": False, "message": safe_err(str(e))}
+        await self.db.commands.update_one(
+            {"_id": c["_id"]}, {"$set": {"status": "done", "result": result, "done_at": now_iso()}})
 
     async def _do_select_instrument(self, token):
         res = self.broker.select_instrument(token)
@@ -1346,7 +1387,9 @@ class TradingEngine:
             return await self.backtest(from_date=payload.get("from_date"),
                                        to_date=payload.get("to_date"),
                                        brick_size=payload.get("brick_size"),
-                                       days=int(payload.get("days", 30)))
+                                       brick_sizes=payload.get("brick_sizes"),
+                                       days=int(payload.get("days", 30)),
+                                       source=payload.get("source", "future"))
         if ctype == "instruments":
             if not self.broker.connected:
                 return {"ok": False, "error": "Connect Angel One first.", "items": []}
@@ -1764,13 +1807,32 @@ async def angel_load_history(body: dict = None):
 
 @api_router.post("/backtest")
 async def run_backtest(body: dict = None):
+    """Submit a backtest job (runs in the background on the leader). Returns a job_id to poll —
+    avoids holding the HTTP connection open for long multi-year runs."""
     body = body or {}
-    return await _relay("backtest", {
-        "from_date": body.get("from_date"),
-        "to_date": body.get("to_date"),
-        "brick_size": body.get("brick_size"),
-        "days": int(body.get("days", 30)),
-    }, timeout=90.0)
+    job_id = str(uuid.uuid4())
+    await db.commands.insert_one({
+        "_id": job_id, "type": "backtest", "status": "pending",
+        "created_at": now_iso(), "created_ts": time.time(),
+        "payload": {
+            "from_date": body.get("from_date"), "to_date": body.get("to_date"),
+            "brick_size": body.get("brick_size"), "brick_sizes": body.get("brick_sizes"),
+            "source": body.get("source", "future"), "days": int(body.get("days", 30)),
+        },
+    })
+    return {"ok": True, "job_id": job_id}
+
+
+@api_router.get("/backtest/result/{job_id}")
+async def backtest_result(job_id: str):
+    doc = await db.commands.find_one({"_id": job_id})
+    if not doc:
+        return {"status": "not_found"}
+    if doc.get("status") == "done":
+        result = doc.get("result")
+        await db.commands.delete_one({"_id": job_id})
+        return {"status": "done", "result": result}
+    return {"status": "running"}
 
 
 @api_router.get("/angel/instruments")

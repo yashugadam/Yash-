@@ -376,15 +376,19 @@ class AngelBroker:
                     break
         return None
 
-    def get_history(self, interval, from_dt, to_dt):
+    def get_history(self, interval, from_dt, to_dt, exchange=None, token=None):
         """Fetch historical candles. from_dt/to_dt format: 'YYYY-MM-DD HH:MM'.
+        Defaults to the selected future; pass exchange/token to fetch another instrument
+        (e.g. the NIFTY 50 index: exchange='NSE', token='99926000') for long continuous history.
         Returns list of [timestamp, open, high, low, close, volume]."""
-        if not self.connected or not self.fut_token:
+        tok = token or self.fut_token
+        exch = exchange or "NFO"
+        if not self.connected or not tok:
             return None
         try:
             params = {
-                "exchange": "NFO",
-                "symboltoken": self.fut_token,
+                "exchange": exch,
+                "symboltoken": str(tok),
                 "interval": interval,
                 "fromdate": from_dt,
                 "todate": to_dt,

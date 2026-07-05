@@ -47,15 +47,18 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
-- BACKTEST (July 2026): `engine.backtest(from_date,to_date,brick_size,days)` — simulation-only,
-  NO orders, doesn't mutate live state. Fetches real Angel One 1-min candles (get_history,
-  paginated, ≤70 days) and replays them through the EXACT live Renko + entry/exit rules
-  (short on 2 reds; exit 1st green if ≤4 reds else 2 greens). Fills = brick close (excludes
-  slippage/brokerage). Returns summary (net_pnl, win_rate, PF, max_dd, best/worst, net_points),
-  trades list, equity curve. Route: `POST /api/backtest` -> relay cmd "backtest" (leader,
-  timeout 90s). UI: `Backtest.js` modal (date range + brick size + results + SVG equity curve
-  + trades table), opened via "Backtest" button in Dashboard header. NOTE: history limited to
-  the selected front-month contract's lifespan.
+- BACKTEST (July 2026): simulation-only, NO orders. `engine.backtest(from_date,to_date,
+  brick_size|brick_sizes,days,source)` + `engine._simulate(candles,bs,...)`. source='index'
+  uses NIFTY 50 index (token 99926000, exch NSE) for CONTINUOUS multi-year 1-min history
+  (up to 760 days); source='future' uses the selected contract (limited lifespan). Fetches
+  candles once (paginate 25-day chunks, ≤70 calls) then simulates each brick size; sweep
+  returns per-brick comparison + best_brick_size + best trades/equity. Fills = brick close
+  (excludes slippage/brokerage). Runs as a BACKGROUND task on the leader (never blocks the
+  trading loop). Submit+poll flow: `POST /api/backtest` -> {job_id}; `GET /api/backtest/
+  result/{job_id}` -> running|done. UI: `Backtest.js` (source toggle, date range, brick-size
+  list, sweep table, summary, SVG equity curve, trades). Verified: 2-yr NIFTY index sweep
+  [30,40,50] = 184,623 candles, best brick 30 (net ~Rs12.3L, PF 2.66, 459 trades) — costs
+  excluded; brick 30 trades ~2x more so real slippage/brokerage matters.
 - AUTHENTICATION (July 2026, SEC-001 FIXED): single-user JWT login. Creds in backend `.env`
   (`AUTH_USERNAME`, `AUTH_PASSWORD`, `JWT_SECRET`); seeded to Mongo `auth_user` (`_id: singleton`,
   bcrypt hash) on startup. `POST /api/auth/login` -> `{token}` (HS256, 12h); `GET /api/auth/me`.
