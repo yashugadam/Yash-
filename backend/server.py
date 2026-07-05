@@ -312,6 +312,125 @@ class TradingEngine:
                 "from": start.strftime("%Y-%m-%d"), "to": now.strftime("%Y-%m-%d"),
                 "symbol": self.broker.fut_symbol}
 
+    # -------- strategy backtest (simulation-only: real historical candles, NO orders) --------
+    async def backtest(self, from_date=None, to_date=None, brick_size=None, days=30):
+        """Replay real Angel One 1-min candles through the EXACT live Renko + entry/exit rules
+        and report performance. Pure simulation — never places an order or mutates live state.
+        Fills use brick-close prices (idealized: excludes slippage/brokerage)."""
+        if not self.broker.connected:
+            return {"ok": False, "error": "Connect Angel One first."}
+        bs = int(brick_size or self.settings["brick_size"])
+        if bs <= 0:
+            return {"ok": False, "error": "brick_size must be positive"}
+        lot = self.settings["lot_size"]
+        max_red_single_green = self.settings["max_red_single_green"]
+        greens_ext = self.settings["greens_to_exit_extended"]
+        now = datetime.now(IST)
+        try:
+            start = datetime.strptime(from_date, "%Y-%m-%d").replace(hour=9, minute=15, tzinfo=IST) \
+                if from_date else (now - timedelta(days=int(days))).replace(hour=9, minute=15)
+        except Exception:
+            return {"ok": False, "error": "Bad from_date (use YYYY-MM-DD)"}
+        end = now
+        if to_date:
+            try:
+                end = datetime.strptime(to_date, "%Y-%m-%d").replace(hour=15, minute=30, tzinfo=IST)
+            except Exception:
+                return {"ok": False, "error": "Bad to_date (use YYYY-MM-DD)"}
+        if end <= start:
+            return {"ok": False, "error": "to_date must be after from_date"}
+        if (end - start).days > 70:
+            start = end - timedelta(days=70)   # Angel history sanity cap
+
+        all_candles, seen, cur, calls = [], set(), start, 0
+        while cur < end and calls < 40:
+            chunk_end = min(cur + timedelta(days=4), end)
+            candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE",
+                          cur.strftime("%Y-%m-%d %H:%M"), chunk_end.strftime("%Y-%m-%d %H:%M"))
+            calls += 1
+            if candles:
+                for c in candles:
+                    if c[0] not in seen:
+                        seen.add(c[0]); all_candles.append(c)
+            cur = chunk_end + timedelta(minutes=1)
+            await asyncio.sleep(0.4)
+        if not all_candles:
+            return {"ok": False, "error": self.broker.error or "No historical candles returned"}
+        all_candles.sort(key=lambda c: c[0])
+
+        anchor = {"v": None}; direction = {"v": 0}; seq = {"v": 0}
+
+        def bricks_from_close(price, ts):
+            out = []
+            if anchor["v"] is None:
+                anchor["v"] = round(price / bs) * bs; direction["v"] = 0; return out
+            n = int((price - anchor["v"]) / bs)
+            if n == 0:
+                return out
+            s = 1 if n > 0 else -1
+            if direction["v"] == 0 or s == direction["v"]:
+                count = abs(n)
+            else:
+                if abs(n) < 2:
+                    return out
+                count = abs(n) - 1; anchor["v"] += s * bs
+            for _ in range(count):
+                o = anchor["v"]; c2 = anchor["v"] + s * bs; anchor["v"] = c2; direction["v"] = s
+                seq["v"] += 1
+                out.append({"index": seq["v"], "color": "green" if s > 0 else "red",
+                            "close": round(c2, 2), "time": ts})
+            return out
+
+        consec_red = consec_green = down_run_reds = 0
+        position = None; trades = []
+        equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
+        for c in all_candles:
+            for b in bricks_from_close(float(c[4]), c[0]):
+                if b["color"] == "red":
+                    consec_red += 1; consec_green = 0
+                    if position:
+                        down_run_reds += 1
+                    elif consec_red >= 2:
+                        down_run_reds = consec_red
+                        position = {"entry": b["close"], "entry_time": b["time"]}
+                else:
+                    consec_green += 1; consec_red = 0
+                    if position:
+                        need = greens_ext if down_run_reds >= max_red_single_green else 1
+                        if consec_green >= need:
+                            pts = position["entry"] - b["close"]   # SHORT: profit when price falls
+                            pnl = pts * lot
+                            trades.append({"entry_time": position["entry_time"], "exit_time": b["time"],
+                                           "entry": position["entry"], "exit": b["close"],
+                                           "points": round(pts, 2), "pnl": round(pnl, 2),
+                                           "reds": down_run_reds, "equity": round(equity + pnl, 2)})
+                            equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
+                            if pnl >= 0:
+                                wins += 1; gross_win += pnl
+                            else:
+                                gross_loss += pnl
+                            position = None; down_run_reds = 0
+        n = len(trades)
+        net = round(sum(t["pnl"] for t in trades), 2)
+        summary = {
+            "trades": n, "wins": wins, "losses": n - wins,
+            "win_rate": round(100 * wins / n, 1) if n else 0.0,
+            "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
+            "avg_pnl": round(net / n, 2) if n else 0.0,
+            "best": round(max((t["pnl"] for t in trades), default=0.0), 2),
+            "worst": round(min((t["pnl"] for t in trades), default=0.0), 2),
+            "profit_factor": round(gross_win / abs(gross_loss), 2) if gross_loss else None,
+            "max_drawdown": round(max_dd, 2),
+            "candles": len(all_candles), "open_position": bool(position),
+        }
+        return {"ok": True, "summary": summary, "trades": trades[-1000:],
+                "params": {"brick_size": bs, "lot_size": lot,
+                           "max_red_single_green": max_red_single_green,
+                           "greens_to_exit_extended": greens_ext,
+                           "from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d"),
+                           "symbol": self.broker.fut_symbol}}
+
+
     def _new_brick(self, color, o, c, ts=None):
         self.brick_seq += 1
         b = {"index": self.brick_seq, "color": color, "open": round(o, 2),
@@ -1223,6 +1342,11 @@ class TradingEngine:
         if ctype == "load_history":
             return await self.load_history(days=int(payload.get("days", 5)),
                                            from_date=payload.get("from_date"))
+        if ctype == "backtest":
+            return await self.backtest(from_date=payload.get("from_date"),
+                                       to_date=payload.get("to_date"),
+                                       brick_size=payload.get("brick_size"),
+                                       days=int(payload.get("days", 30)))
         if ctype == "instruments":
             if not self.broker.connected:
                 return {"ok": False, "error": "Connect Angel One first.", "items": []}
@@ -1636,6 +1760,17 @@ async def angel_load_history(body: dict = None):
     body = body or {}
     days = max(1, min(int(body.get("days", 5)), 70))
     return await _relay("load_history", {"days": days, "from_date": body.get("from_date")}, timeout=45.0)
+
+
+@api_router.post("/backtest")
+async def run_backtest(body: dict = None):
+    body = body or {}
+    return await _relay("backtest", {
+        "from_date": body.get("from_date"),
+        "to_date": body.get("to_date"),
+        "brick_size": body.get("brick_size"),
+        "days": int(body.get("days", 30)),
+    }, timeout=90.0)
 
 
 @api_router.get("/angel/instruments")

@@ -7,6 +7,7 @@ import {
   CalendarClock, AlertTriangle, XCircle, ShieldAlert, ShieldX, History, Search, LogOut,
 } from "lucide-react";
 import RenkoChart from "@/components/RenkoChart";
+import Backtest from "@/components/Backtest";
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogFooter,
   AlertDialogTitle, AlertDialogDescription, AlertDialogAction, AlertDialogCancel,
@@ -45,6 +46,7 @@ export default function Dashboard({ onLogout }) {
   const [showInstSearch, setShowInstSearch] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [showStartConfirm, setShowStartConfirm] = useState(false);
+  const [showBacktest, setShowBacktest] = useState(false);
   const [recon, setRecon] = useState(null);
   const [reconBusy, setReconBusy] = useState(false);
   const [orderLog, setOrderLog] = useState([]);
@@ -286,6 +288,9 @@ export default function Dashboard({ onLogout }) {
           <button onClick={reset} className="border border-slate-300 hover:bg-slate-50 text-slate-600 px-3 py-1.5 transition-colors" data-testid="reset-button" title="Reset session">
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
+          <button onClick={() => setShowBacktest(true)} className="border border-slate-300 hover:bg-slate-50 text-slate-600 px-3 py-1.5 transition-colors flex items-center gap-1.5 text-xs font-mono uppercase tracking-wider" data-testid="backtest-button" title="Backtest the strategy on historical data">
+            <History className="h-3.5 w-3.5" /> Backtest
+          </button>
           <button onClick={onLogout} className="border border-slate-300 hover:bg-slate-50 text-slate-600 px-3 py-1.5 transition-colors" data-testid="logout-button" title="Log out">
             <LogOut className="h-3.5 w-3.5" />
           </button>
@@ -296,6 +301,8 @@ export default function Dashboard({ onLogout }) {
           </button>
         </div>
       </header>
+
+      {showBacktest && <Backtest onClose={() => setShowBacktest(false)} defaultBrick={state?.settings?.brick_size || 50} />}
 
       <AlertDialog open={showStopConfirm} onOpenChange={setShowStopConfirm}>
         <AlertDialogContent data-testid="stop-confirm-dialog">

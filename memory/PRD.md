@@ -47,6 +47,15 @@ green; >4 reds → wait for 2 greens.
   Controls / RiskWidget components.
 
 ## Critical Notes
+- BACKTEST (July 2026): `engine.backtest(from_date,to_date,brick_size,days)` — simulation-only,
+  NO orders, doesn't mutate live state. Fetches real Angel One 1-min candles (get_history,
+  paginated, ≤70 days) and replays them through the EXACT live Renko + entry/exit rules
+  (short on 2 reds; exit 1st green if ≤4 reds else 2 greens). Fills = brick close (excludes
+  slippage/brokerage). Returns summary (net_pnl, win_rate, PF, max_dd, best/worst, net_points),
+  trades list, equity curve. Route: `POST /api/backtest` -> relay cmd "backtest" (leader,
+  timeout 90s). UI: `Backtest.js` modal (date range + brick size + results + SVG equity curve
+  + trades table), opened via "Backtest" button in Dashboard header. NOTE: history limited to
+  the selected front-month contract's lifespan.
 - AUTHENTICATION (July 2026, SEC-001 FIXED): single-user JWT login. Creds in backend `.env`
   (`AUTH_USERNAME`, `AUTH_PASSWORD`, `JWT_SECRET`); seeded to Mongo `auth_user` (`_id: singleton`,
   bcrypt hash) on startup. `POST /api/auth/login` -> `{token}` (HS256, 12h); `GET /api/auth/me`.
