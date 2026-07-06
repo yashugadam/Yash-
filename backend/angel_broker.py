@@ -523,40 +523,49 @@ class AngelBroker:
                     except (TypeError, ValueError):
                         pass
             return 0.0
-        try:
-            with self._order_proxy():
-                res = self.smart.position()
-            if res.get("status"):
-                realised = unrealised = 0.0
-                for p in res.get("data") or []:
-                    realised += _num(p, "realised", "realized", "m2mrealised", "m2mrealized")
-                    unrealised += _num(p, "unrealised", "unrealized", "m2munrealised", "m2munrealized")
-                return {"found": True, "realised": round(realised, 2),
-                        "unrealised": round(unrealised, 2),
-                        "total": round(realised + unrealised, 2)}
-            self.error = str(res.get("message") or res)
-        except Exception as e:
-            self.error = str(e)
-            logger.warning("get_day_pnl failed: %s", e)
+        for attempt in range(2):
+            try:
+                with self._order_proxy():
+                    res = self.smart.position()
+                if res.get("status"):
+                    realised = unrealised = 0.0
+                    for p in res.get("data") or []:
+                        realised += _num(p, "realised", "realized", "m2mrealised", "m2mrealized")
+                        unrealised += _num(p, "unrealised", "unrealized", "m2munrealised", "m2munrealized")
+                    return {"found": True, "realised": round(realised, 2),
+                            "unrealised": round(unrealised, 2),
+                            "total": round(realised + unrealised, 2)}
+                self.error = str(res.get("message") or res)
+            except Exception as e:
+                self.error = str(e)
+                logger.warning("get_day_pnl failed (attempt %d): %s", attempt + 1, e)
+            if attempt == 0 and not self.relogin():
+                break
         return {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
 
     def get_net_position(self):
         """Net quantity for the selected future token. Negative = short, positive = long.
-        Returns {found, netqty, avgprice}. found=True with netqty=0 means flat."""
-        try:
-            res = self.smart.position()
-            if res.get("status"):
-                for p in res.get("data") or []:
-                    tok = str(p.get("symboltoken") or p.get("scripttoken") or "")
-                    if tok == str(self.fut_token):
-                        return {"found": True, "netqty": int(float(p.get("netqty") or 0)),
-                                "avgprice": float(p.get("avgnetprice") or p.get("netprice")
-                                                  or p.get("openprice") or 0) or None}
-                return {"found": True, "netqty": 0, "avgprice": None}  # flat for this token
-            self.error = str(res.get("message") or res)
-        except Exception as e:
-            self.error = str(e)
-            logger.warning("position() failed: %s", e)
+        Returns {found, netqty, avgprice}. found=True with netqty=0 means flat.
+        Auto-relogins once on an expired/invalid session so reconciliation self-heals."""
+        for attempt in range(2):
+            try:
+                res = self.smart.position()
+                if res.get("status"):
+                    for p in res.get("data") or []:
+                        tok = str(p.get("symboltoken") or p.get("scripttoken") or "")
+                        if tok == str(self.fut_token):
+                            return {"found": True, "netqty": int(float(p.get("netqty") or 0)),
+                                    "avgprice": float(p.get("avgnetprice") or p.get("netprice")
+                                                      or p.get("openprice") or 0) or None}
+                    return {"found": True, "netqty": 0, "avgprice": None}  # flat for this token
+                self.error = str(res.get("message") or res)
+            except Exception as e:
+                self.error = str(e)
+                logger.warning("position() failed (attempt %d): %s", attempt + 1, e)
+            if attempt == 0:
+                logger.info("position(): attempting Angel auto-relogin…")
+                if not self.relogin():
+                    break
         return {"found": False, "error": self.error}
 
     def logout(self):

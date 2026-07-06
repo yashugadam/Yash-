@@ -1,0 +1,26 @@
+{
+  "summary": "Frontend-only smoke test of the 'Invalid Token' reconciliation bug fix. Logged in as Yashgadam and clicked ONLY the 'Check Angel One' button. No START/STOP/order/square-off/settings actions performed (real-money account).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested", "frontend": "100%"},
+  "test_credentials": "Yashgadam / Yashbgadam@1994 (works)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Login uses data-testid=login-username / login-password. Reconcile trigger is data-testid=reconcile-check-button; result container is data-testid=reconcile-widget with sub-states reconcile-good / reconcile-entry-missed / reconcile-exit-missed / reconcile-unavailable. GET /api/bot/reconcile returned 200 {available:true,state:'GOOD',message:'Bot and Angel One match - everything is in sync.',mode:'LIVE',broker_netqty:0}. STRICTLY do NOT click START/STOP, Buy/Sell 1 Lot, Sync, Adopt, Reset, Connect/Disconnect on this LIVE real-money account.",
+  "verification_details": {
+    "reconcile_api_status": 200,
+    "reconcile_api_body": "{\"available\":true,\"state\":\"GOOD\",\"message\":\"Bot and Angel One match - everything is in sync.\",\"mode\":\"LIVE\",\"bot_position\":null,\"broker_netqty\":0,\"broker_avgprice\":null}",
+    "widget_text_shown": "Everything is good — Bot and Angel One match - everything is in sync. Broker net qty: 0",
+    "invalid_token_present": false
+  },
+  "rca of the issue": "Original bug: angel_broker.get_net_position()/get_day_pnl() called Angel SmartAPI position() with no relogin retry, so an expired session bubbled up as 'Invalid Token' via /api/bot/reconcile. Fix (2 attempts + relogin() on first failure) is confirmed working: reconciliation now returns 200 GOOD state and the Dashboard renders 'Everything is good' with no 'Invalid Token' text anywhere in the response or UI."
+}
