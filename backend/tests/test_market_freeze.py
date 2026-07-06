@@ -33,6 +33,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 load_dotenv(Path(__file__).resolve().parents[2] / "frontend" / ".env")
 
 import server  # noqa: E402
+import engine as engine_mod  # noqa: E402  (_market_open lives here post-refactor)
 from server import IST, engine  # noqa: E402
 
 BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
@@ -80,7 +81,7 @@ class TestMarketOpenWindow:
     ])
     def test_market_open_truth_table(self, label, ist_dt, expected):
         fake = _make_fake_datetime(ist_dt)
-        with patch.object(server, "datetime", fake):
+        with patch.object(engine_mod, "datetime", fake):
             assert engine._market_open() is expected, f"{label} -> expected {expected}"
 
 

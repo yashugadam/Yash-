@@ -109,3 +109,25 @@ green; >4 reds → wait for 2 greens.
   explicit user consent.
 - Production env vars are managed separately from preview .env; code fixes need a
   redeploy to reach production.
+
+
+## Changelog
+- 2026-07-06 — CODE REFACTOR (behavior-preserving, no logic change):
+  * Backend: `server.py` (1912 lines) split into modules — `config.py` (constants/logging/IST),
+    `db.py` (Mongo client), `security.py` (JWT + password + seed), `utils.py` (now_iso/expiry),
+    `engine.py` (TradingEngine + `engine` singleton), `routes.py` (API router + `_relay`).
+    `server.py` is now a 58-line entrypoint (app, CORS, auth-gate middleware, startup/shutdown)
+    and re-exports `engine/TradingEngine/db/app/IST/MAX_EXIT_RETRIES/EXIT_RETRY_MIN_GAP` so the
+    existing `tests/` import paths keep working. Only test change: `test_market_freeze.py` now
+    patches `engine.datetime` (function moved out of `server`).
+  * Frontend: `Dashboard.js` (831 lines) reduced to a 273-line container. Extracted 13 panel
+    components + shared `Widget` under `src/components/dashboard/`, and `fmt/pnlClass/sign`
+    into `src/lib/format.js`. All data-testids preserved; UI renders identically.
+  * Verification: backend unit tests at exact baseline parity (66 passed / 74 failed — the 74
+    are pre-existing failures from API tests that don't send a JWT / need a live broker, NOT
+    caused by this refactor); end-to-end curl (login → auth/me → /state) OK; frontend compiles
+    and full dashboard renders with all panels.
+  * Fixed `.gitignore` blocking `.env` (deployment blocker) so production redeploy can inject
+    env values.
+- FOLLOW-UP: `engine.py` (1498 lines, the TradingEngine class) is cohesive but could be split
+  further (renko/strategy vs. leadership vs. backtest vs. reconciliation) in a later pass.
