@@ -162,7 +162,7 @@ def test_adopt_decline_keeps_block_and_no_position():
 
 # ---------- LONG handling ----------
 
-def test_on_start_with_broker_long_blocks_trading(monkeypatch):
+def test_on_start_with_broker_long_sets_pending_adoption(monkeypatch):
     monkeypatch.setattr(engine.broker, "get_net_position",
                         lambda: {"found": True, "netqty": 50, "avgprice": 24000.0})
     run(engine._on_start())
@@ -171,22 +171,22 @@ def test_on_start_with_broker_long_blocks_trading(monkeypatch):
     assert engine.pending_adoption["netqty"] == 50
     assert engine.pending_adoption["qty"] == 50
     assert engine.position is None
-    # Alert is error severity
+    # LONG is now adoptable (symmetric strategy) -> warning severity, not error
     assert engine.alert is not None
-    assert engine.alert.get("level") == "error"
-    # Entries blocked
+    assert engine.alert.get("level") == "warning"
+    # Entries stay blocked until the user decides
     assert engine._entries_blocked() is True
 
 
-def test_adopt_confirm_long_rejected():
+def test_adopt_confirm_long_promotes_to_position():
     engine.pending_adoption = {"qty": 50, "avgprice": 24000.0, "netqty": 50,
                                 "side": "LONG", "declined": False}
     res = run(engine.adopt_position(True))
-    assert res["ok"] is False
-    assert "long" in res["message"].lower()
-    assert engine.position is None
-    # Still blocking entries (declined flag is set on rejection)
-    assert engine._entries_blocked() is True
+    assert res["ok"] is True
+    assert engine.position is not None
+    assert engine.position["side"] == "LONG"
+    assert engine.position["qty"] == 50
+    assert engine.pending_adoption is None
 
 
 # ---------- BROKER FLAT ----------

@@ -34,7 +34,7 @@ export function ReconcilePanel({ state, recon, reconBusy, checkReconcile, resolv
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 text-amber-600 mt-0.5" />
                   <div>
-                    <p className="font-mono text-xs font-semibold text-amber-700">Short trade missed</p>
+                    <p className="font-mono text-xs font-semibold text-amber-700">Entry missed</p>
                     <p className="font-mono text-[11px] text-slate-500 mt-1">{recon.message}</p>
                     <p className="font-mono text-[10px] text-slate-400 mt-1">Bot qty: {recon.bot_position?.qty} · Broker net qty: {recon.broker_netqty}</p>
                   </div>

@@ -66,6 +66,7 @@ class TradingEngine:
         self.down_run_reds = 0
         self.position: Optional[Dict[str, Any]] = None
         self.pending_entry = False
+        self._entry_side: Optional[str] = None    # side of the position being entered (LONG/SHORT)
         self.pending_exit = False
         self.exit_retry_pending = False
         self.forced_exit_pending = False
@@ -79,7 +80,8 @@ class TradingEngine:
         # safety: duplicate-order protection, expiry square-off, crash recovery
         self.order_lock = asyncio.Lock()
         self.squared_off_date: Optional[str] = None   # date (IST) we already squared off / blocked entries
-        self._rollover_armed = False                   # set at expiry square-off to re-short next month
+        self._rollover_armed = False                   # set at expiry square-off to re-open on next month
+        self._rollover_side: Optional[str] = None      # side to re-open at expiry rollover
         # On Start: if Angel One holds a short we didn't open (e.g. a manual trade taken while the
         # bot was off), surface it for the user to ADOPT so the bot manages its exit per strategy.
         self.pending_adoption = None                   # {qty, avgprice, netqty, declined}
@@ -357,32 +359,54 @@ class TradingEngine:
 
     # -------- strategy --------
     def _process_brick(self, brick):
-        if brick["color"] == "red":
+        color = brick["color"]
+        if color == "red":
             self.consec_red += 1
             self.consec_green = 0
-            if self.position or self.pending_entry:
-                self.down_run_reds += 1
-            elif self.consec_red >= 2 and not (self.position or self.pending_entry) \
-                    and not self._entries_blocked():
-                # Aggressive entry: short on 2+ reds. If the bot (re)starts mid-downtrend
-                # with a run already >2 reds, it enters immediately on the next red instead
-                # of waiting for a green reset — so an in-progress downtrend isn't missed.
-                self.down_run_reds = self.consec_red
-                self.pending_entry = True
-                brick["signal"] = "SHORT"
-                asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
-        else:  # green
+        else:
             self.consec_green += 1
             self.consec_red = 0
-            if self.position and not self.pending_exit:
-                # Option B: 4 or more reds (incl. the 2 entry reds) -> wait for 2 greens;
-                # fewer than 4 reds (i.e. 2 or 3) -> exit on the 1st green.
-                need = self.settings["greens_to_exit_extended"] \
-                    if self.down_run_reds >= self.settings["max_red_single_green"] else 1
-                if self.consec_green >= need:
-                    self.pending_exit = True
-                    brick["signal"] = "COVER"
-                    asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, brick["index"]))
+
+        # Deepen the trend-run the current (or pending) position is riding. This run length
+        # picks the exit rule: run <= max_red_single_green favourable bricks -> exit on the
+        # 1st opposite brick; a longer run -> wait for greens_to_exit_extended opposite bricks.
+        held_side = self.position["side"] if self.position \
+            else (self._entry_side if self.pending_entry else None)
+        if held_side and ((held_side == "SHORT" and color == "red")
+                          or (held_side == "LONG" and color == "green")):
+            self.down_run_reds += 1
+
+        # ---- EXIT: opposite brick(s) against an open position ----
+        if self.position and not self.pending_exit:
+            need = self.settings["greens_to_exit_extended"] \
+                if self.down_run_reds >= self.settings["max_red_single_green"] else 1
+            if self.position["side"] == "SHORT" and color == "green" and self.consec_green >= need:
+                self.pending_exit = True
+                brick["signal"] = "COVER"
+                asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, brick["index"]))
+                return
+            if self.position["side"] == "LONG" and color == "red" and self.consec_red >= need:
+                self.pending_exit = True
+                brick["signal"] = "EXIT_LONG"
+                asyncio.create_task(self._execute_order("SELL", "EXIT", self.price, brick["index"]))
+                return
+
+        # ---- ENTRY: 2+ same-direction bricks while flat (symmetric long & short). Flips
+        # immediately after an exit once the opposite 2-brick setup is met. If the bot (re)starts
+        # mid-trend with a run already > 2, it enters on the next same-colour brick. ----
+        if not (self.position or self.pending_entry) and not self._entries_blocked():
+            if color == "red" and self.consec_red >= 2:
+                self.down_run_reds = self.consec_red
+                self.pending_entry = True
+                self._entry_side = "SHORT"
+                brick["signal"] = "SHORT"
+                asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
+            elif color == "green" and self.consec_green >= 2:
+                self.down_run_reds = self.consec_green
+                self.pending_entry = True
+                self._entry_side = "LONG"
+                brick["signal"] = "LONG"
+                asyncio.create_task(self._execute_order("BUY", "ENTRY", self.price, brick["index"]))
 
     # -------- order execution: escalating limit with hard slippage cap + retries --------
     async def _cur_price(self):
@@ -574,11 +598,11 @@ class TradingEngine:
         if not np.get("found"):
             return {"available": False, "reason": np.get("error") or "Could not read positions."}
         broker_qty = int(np.get("netqty", 0))
-        bot_short = bool(self.position)
-        if bot_short and broker_qty == 0:
-            state, msg = "ENTRY_MISSED", ("Bot shows an open SHORT but Angel One shows NO position - "
+        bot_open = bool(self.position)
+        if bot_open and broker_qty == 0:
+            state, msg = "ENTRY_MISSED", ("Bot shows an open position but Angel One shows NO position - "
                                           "the entry order never executed. You can re-enter the trade.")
-        elif (not bot_short) and broker_qty != 0:
+        elif (not bot_open) and broker_qty != 0:
             state, msg = "EXIT_MISSED", ("Angel One still shows an OPEN position but the bot is flat - "
                                          "the exit never executed. You can exit the trade again.")
         else:
@@ -591,20 +615,25 @@ class TradingEngine:
         if action == "reenter":
             if not self.position:
                 return {"ok": False, "message": "No bot position to re-enter."}
+            side = self.position["side"]
             reds = self.position.get("reds_at_entry", 2)
             self.position = None
             self.pending_entry = True
+            self._entry_side = side
             self.down_run_reds = reds
-            asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, -1, "RECONCILE_REENTRY"))
+            order_side = "SELL" if side == "SHORT" else "BUY"
+            asyncio.create_task(self._execute_order(order_side, "ENTRY", self.price, -1, "RECONCILE_REENTRY"))
             await self._persist_state()
-            return {"ok": True, "message": "Re-entry SHORT order placed."}
+            return {"ok": True, "message": f"Re-entry {side} order placed."}
         if action == "reexit":
             np = await asyncio.to_thread(self.broker.get_net_position)
-            qty = abs(int(np.get("netqty", 0)))
+            netqty = int(np.get("netqty", 0))
+            qty = abs(netqty)
             if qty == 0:
                 return {"ok": False, "message": "Angel One shows no open position to exit."}
+            side = "SHORT" if netqty < 0 else "LONG"
             self.position = {
-                "side": "SHORT", "qty": qty, "entry_price": np.get("avgprice") or self.price,
+                "side": side, "qty": qty, "entry_price": np.get("avgprice") or self.price,
                 "entry_time": now_iso(), "entry_order_id": "RECONCILE",
                 "reds_at_entry": self.down_run_reds, "unrealized_pnl": 0.0,
             }
@@ -618,7 +647,8 @@ class TradingEngine:
             np = await asyncio.to_thread(self.broker.get_net_position)
             if not np.get("found"):
                 return {"ok": False, "message": np.get("error") or "Could not read Angel One positions."}
-            qty = abs(int(np.get("netqty", 0)))
+            netqty = int(np.get("netqty", 0))
+            qty = abs(netqty)
             self.pending_entry = self.pending_exit = False
             self.exit_retry_pending = False
             self._exit_retry_count = 0
@@ -629,13 +659,14 @@ class TradingEngine:
                 return {"ok": True, "message": "Synced — bot set to FLAT to match Angel One "
                         "(the broker already closed the position)."}
             # broker holds a position -> adopt it so the bot manages/exits it per strategy
+            side = "SHORT" if netqty < 0 else "LONG"
             self.position = {
-                "side": "SHORT", "qty": qty, "entry_price": np.get("avgprice") or self.price,
+                "side": side, "qty": qty, "entry_price": np.get("avgprice") or self.price,
                 "entry_time": now_iso(), "entry_order_id": "RECONCILE_ADOPT",
                 "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
             }
             await self._persist_state()
-            return {"ok": True, "message": f"Synced — adopted Angel One's open position ({qty} qty) into the bot."}
+            return {"ok": True, "message": f"Synced — adopted Angel One's open {side} ({qty} qty) into the bot."}
         return {"ok": False, "message": "Unknown action."}
 
     async def manual_order(self, side, qty=None):
@@ -694,47 +725,63 @@ class TradingEngine:
         return {"ok": True, "order_status": order["status"], "limit_price": order["limit_price"],
                 "fill_price": order["fill_price"], "broker_order_id": oid, "note": order["note"]}
 
+    def _replay_position(self):
+        """Replay the existing bricks through the SAME symmetric entry/exit rules to work out
+        which position (if any) the bot should currently be holding. Returns
+        (side|None, run_len, consec_red, consec_green). Used on Start to catch up to a move
+        already in progress (no orders placed here)."""
+        cr = cg = run = 0
+        side = None
+        max_red = self.settings["max_red_single_green"]
+        greens_ext = self.settings["greens_to_exit_extended"]
+        for b in self.bricks:
+            if b["color"] == "red":
+                cr += 1; cg = 0
+            else:
+                cg += 1; cr = 0
+            exited = False
+            if side:
+                if (side == "SHORT" and b["color"] == "red") or (side == "LONG" and b["color"] == "green"):
+                    run += 1
+                need = greens_ext if run >= max_red else 1
+                if side == "SHORT" and b["color"] == "green" and cg >= need:
+                    side = None; run = 0; exited = True
+                elif side == "LONG" and b["color"] == "red" and cr >= need:
+                    side = None; run = 0; exited = True
+            if side is None and not exited:
+                if b["color"] == "red" and cr >= 2:
+                    side = "SHORT"; run = cr
+                elif b["color"] == "green" and cg >= 2:
+                    side = "LONG"; run = cg
+        return side, run, cr, cg
+
     async def _maybe_enter_on_start(self):
-        """On Start (catching up to a move already in progress): mirror the EXIT rule to
-        decide if a down-move is still 'short-biased'. Look at the most recent red down-run
-        and the green pullback after it:
-          - down-run of 2-3 reds  -> short-biased unless 1 green has printed
-          - down-run of 4+ reds   -> short-biased unless 2 greens have printed
-        If still short-biased and we're flat, enter SHORT immediately. (Only on Start.)"""
+        """On Start (catching up to a move already in progress): replay the bricks through the
+        strategy. If that leaves us in a position while we're flat, enter it now at market."""
         if not self.running or self.position or self.pending_entry or self.pending_exit:
             return
         if self._entries_blocked():
             return
-        # count trailing greens, then the red run immediately before them
-        trailing_greens, i = 0, len(self.bricks) - 1
-        while i >= 0 and self.bricks[i]["color"] == "green":
-            trailing_greens += 1
-            i -= 1
-        reds_before = 0
-        while i >= 0 and self.bricks[i]["color"] == "red":
-            reds_before += 1
-            i -= 1
-        if reds_before < 2:
-            return  # no valid short setup
-        required = self.settings["greens_to_exit_extended"] \
-            if reds_before >= self.settings["max_red_single_green"] else 1
-        if trailing_greens >= required:
-            return  # reversal already confirmed -> do not short
-        # down-bias still active -> enter SHORT, carrying the already-printed greens so the
-        # exit rule continues correctly (e.g. 5 reds + 1 green -> 1 more green will exit)
-        self.down_run_reds = reds_before
-        self.consec_red = 0 if trailing_greens > 0 else reds_before
-        self.consec_green = trailing_greens
+        side, run, cr, cg = self._replay_position()
+        if not side:
+            return
+        self.down_run_reds = run
+        self.consec_red = cr
+        self.consec_green = cg
         self.pending_entry = True
+        self._entry_side = side
         last_idx = self.bricks[-1]["index"] if self.bricks else -1
-        self._set_alert(f"Started mid-downtrend ({reds_before} reds, {trailing_greens} green "
-                        f"pullback — reversal not confirmed) — entering SHORT at market.", "info")
-        await self._execute_order("SELL", "ENTRY", self.price, last_idx, "START_IMMEDIATE")
+        order_side = "SELL" if side == "SHORT" else "BUY"
+        trend = "reds" if side == "SHORT" else "greens"
+        self._set_alert(f"Started mid-trend (run of {run} {trend}, reversal not confirmed) — "
+                        f"entering {side} at market.", "info")
+        await self._execute_order(order_side, "ENTRY", self.price, last_idx, "START_IMMEDIATE")
 
     def _apply_fill(self, order):
         if order["kind"] == "ENTRY":
+            side = "LONG" if order["side"] == "BUY" else "SHORT"
             self.position = {
-                "side": "SHORT", "qty": order["qty"], "entry_price": order["fill_price"],
+                "side": side, "qty": order["qty"], "entry_price": order["fill_price"],
                 "entry_time": order["fill_time"], "entry_order_id": order["id"],
                 "reds_at_entry": self.down_run_reds, "unrealized_pnl": 0.0,
             }
@@ -743,12 +790,13 @@ class TradingEngine:
             self._exit_retry_count = 0
         else:  # EXIT
             if self.position:
+                side = self.position["side"]
                 entry = self.position["entry_price"]
                 exit_p = order["fill_price"]
                 qty = order["qty"]
-                pnl = round((entry - exit_p) * qty, 2)  # short
+                pnl = round((entry - exit_p) * qty if side == "SHORT" else (exit_p - entry) * qty, 2)
                 trade = {
-                    "id": str(uuid.uuid4()), "side": "SHORT", "qty": qty,
+                    "id": str(uuid.uuid4()), "side": side, "qty": qty,
                     "entry_price": entry, "exit_price": exit_p,
                     "entry_time": self.position["entry_time"], "exit_time": order["fill_time"],
                     "pnl": pnl, "reds": self.down_run_reds, "symbol": self.settings["symbol"],
@@ -792,8 +840,11 @@ class TradingEngine:
 
     def _update_unrealized(self):
         if self.position:
+            entry = self.position["entry_price"]
+            qty = self.position["qty"]
             self.position["unrealized_pnl"] = round(
-                (self.position["entry_price"] - self.price) * self.position["qty"], 2)
+                (entry - self.price) * qty if self.position["side"] == "SHORT"
+                else (self.price - entry) * qty, 2)
 
     # -------- expiry / square-off --------
     def _market_open(self):
@@ -836,18 +887,12 @@ class TradingEngine:
             np = await asyncio.to_thread(self.broker.get_net_position)
             if np.get("found"):
                 qty = int(np.get("netqty") or 0)
-                if qty < 0:   # SHORT on Angel One that the bot isn't tracking -> ask to adopt
+                if qty != 0:   # a position on Angel One the bot isn't tracking -> ask to adopt
+                    side = "SHORT" if qty < 0 else "LONG"
                     self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
-                                             "netqty": qty, "side": "SHORT", "declined": False}
-                    self._set_alert(f"Found an existing SHORT of {abs(qty)} qty on Angel One. "
+                                             "netqty": qty, "side": side, "declined": False}
+                    self._set_alert(f"Found an existing {side} of {abs(qty)} qty on Angel One. "
                                     f"Adopt it so the bot manages the exit?", "warning")
-                    await self._persist_state()
-                    return
-                if qty > 0:   # LONG is outside the short-only strategy
-                    self.pending_adoption = {"qty": qty, "avgprice": np.get("avgprice"),
-                                             "netqty": qty, "side": "LONG", "declined": False}
-                    self._set_alert(f"A LONG position ({qty} qty) exists on Angel One — outside the "
-                                    f"short-only strategy. Bot will NOT trade until it's resolved.", "error")
                     await self._persist_state()
                     return
         await self._maybe_enter_on_start()
@@ -876,18 +921,13 @@ class TradingEngine:
         if not np.get("found"):
             return
         qty = int(np.get("netqty") or 0)
-        if qty < 0:
+        if qty != 0:
+            side = "SHORT" if qty < 0 else "LONG"
             self.pending_adoption = {"qty": abs(qty), "avgprice": np.get("avgprice"),
-                                     "netqty": qty, "side": "SHORT", "declined": False}
-            self._set_alert(f"Market open safety check: found an existing SHORT of {abs(qty)} qty on "
+                                     "netqty": qty, "side": side, "declined": False}
+            self._set_alert(f"Market open safety check: found an existing {side} of {abs(qty)} qty on "
                             f"Angel One (manual/carry-forward). Adopt it so the bot manages the exit — "
                             f"new entries are paused until you decide.", "warning")
-            await self._persist_state()
-        elif qty > 0:
-            self.pending_adoption = {"qty": qty, "avgprice": np.get("avgprice"),
-                                     "netqty": qty, "side": "LONG", "declined": False}
-            self._set_alert(f"Market open safety check: a LONG position ({qty} qty) exists on Angel One — "
-                            f"outside the short-only strategy. Bot will NOT trade until it's resolved.", "error")
             await self._persist_state()
 
 
@@ -902,18 +942,16 @@ class TradingEngine:
                             "Angel One position is open. Close it manually or Stop & Start to re-check.", "warning")
             await self._persist_state()
             return {"ok": True, "message": "Declined — new entries stay blocked to avoid stacking."}
-        if pa.get("side") == "LONG":
-            self.pending_adoption = {**pa, "declined": True}
-            return {"ok": False, "message": "Long positions aren't supported by the short-only strategy."}
-        # adopt the SHORT and let the strategy manage its exit
+        # adopt the position (long or short) and let the strategy manage its exit
+        side = pa.get("side", "SHORT")
         self.position = {
-            "side": "SHORT", "qty": pa["qty"], "entry_price": pa.get("avgprice") or self.price,
+            "side": side, "qty": pa["qty"], "entry_price": pa.get("avgprice") or self.price,
             "entry_time": now_iso(), "entry_order_id": "ADOPTED_MANUAL",
             "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
         }
         self.pending_adoption = None
         self.pending_entry = self.pending_exit = False
-        self._set_alert(f"Adopted existing SHORT ({self.position['qty']} qty @ "
+        self._set_alert(f"Adopted existing {side} ({self.position['qty']} qty @ "
                         f"{self.position['entry_price']}). Bot will exit it per the strategy.", "info")
         await self._persist_state()
         return {"ok": True, "message": "Adopted — managing exit per strategy."}
@@ -954,9 +992,10 @@ class TradingEngine:
         if is_today and past_cut and self.squared_off_date != str(today):
             if self.position and not self.pending_exit:
                 self.squared_off_date = str(today)
-                # arm true position-rollover: re-open the short on next month after exit fills
+                # arm true position-rollover: re-open the SAME side on next month after exit fills
                 if self.settings.get("rollover_position", True) and self.settings.get("auto_roll", True):
                     self._rollover_armed = True
+                    self._rollover_side = self.position["side"]
                 logger.warning("EXPIRY square-off triggered at %s IST", self.settings["square_off_time"])
                 self._force_exit("EXPIRY_SQUAREOFF")
             elif self.position is None and not self.pending_exit:
@@ -967,7 +1006,8 @@ class TradingEngine:
             return
         self.pending_exit = True
         self.forced_exit_pending = True
-        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, reason))
+        exit_side = "BUY" if self.position["side"] == "SHORT" else "SELL"
+        asyncio.create_task(self._execute_order(exit_side, "EXIT", self.price, -1, reason))
 
     def _maybe_auto_roll(self):
         """Switch to the next-month contract once the active one has expired — including
@@ -1004,27 +1044,35 @@ class TradingEngine:
 
     async def _autoload_after_roll(self):
         await self.load_history(days=5)
-        # True position rollover: if we squared off an OPEN short at expiry, immediately
-        # re-open the short on the just-rolled next-month contract (carry across expiry).
+        # True position rollover: if we squared off an OPEN position at expiry, immediately
+        # re-open the SAME side on the just-rolled next-month contract (carry across expiry).
         if self._rollover_armed:
             self._rollover_armed = False
             await self._rollover_enter()
+            self._rollover_side = None
 
     async def _rollover_enter(self):
-        """Open a fresh SHORT on the newly-rolled next-month contract right after the
-        expiry square-off — independent of a brick signal (expiry position rollover)."""
+        """Open a fresh position (same side as the one squared off) on the newly-rolled
+        next-month contract right after expiry square-off — independent of a brick signal."""
         if self.position or self.pending_entry or not self.broker.connected:
             return
         if not self._market_open():
             self._set_alert("Expiry rollover skipped — market closed; will resume next session.", "warning")
             return
-        # treat like a standard 2-red short so the exit logic behaves normally
-        self.consec_red = self.down_run_reds = 2
-        self.consec_green = 0
+        side = self._rollover_side or "SHORT"
+        # treat like a standard 2-brick entry so the exit logic behaves normally
+        if side == "SHORT":
+            self.consec_red = self.down_run_reds = 2
+            self.consec_green = 0
+        else:
+            self.consec_green = self.down_run_reds = 2
+            self.consec_red = 0
         self.pending_entry = True
+        self._entry_side = side
         cur = await self._cur_price()
-        self._set_alert(f"Expiry rollover — opening new SHORT on {self.broker.fut_symbol}.", "info")
-        await self._execute_order("SELL", "ENTRY", cur, -1, "EXPIRY_ROLLOVER")
+        order_side = "SELL" if side == "SHORT" else "BUY"
+        self._set_alert(f"Expiry rollover — opening new {side} on {self.broker.fut_symbol}.", "info")
+        await self._execute_order(order_side, "ENTRY", cur, -1, "EXPIRY_ROLLOVER")
 
     # -------- crash / restart recovery --------
     def _state_doc(self):
@@ -1428,9 +1476,11 @@ class TradingEngine:
         self.consec_red = self.consec_green = self.down_run_reds = 0
         self.position = None
         self.pending_entry = self.pending_exit = False
+        self._entry_side = None
         self.exit_retry_pending = False
         self._exit_retry_count = 0
         self._rollover_armed = False
+        self._rollover_side = None
         self.pending_adoption = None
         self.forced_exit_pending = False
         self.alert = None

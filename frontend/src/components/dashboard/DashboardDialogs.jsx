@@ -82,7 +82,7 @@ export function DashboardDialogs({ showStopConfirm, setShowStopConfirm, state, c
             </AlertDialogTitle>
             <AlertDialogDescription>
               This bot trades <b>REAL money</b> on your Angel One account ({state.angel?.future || "selected future"}, qty {state.settings?.lot_size}).
-              Once started, it will place real CARRYFORWARD LIMIT orders automatically — and if the market is already in a 2+ red down-run, it will <b>enter a SHORT immediately</b>.
+              Once started, it will place real CARRYFORWARD LIMIT orders automatically — it takes both directions: <b>SHORT on 2 red bricks</b> and <b>LONG on 2 green bricks</b>, and if the market is already trending it will <b>enter immediately</b> in that direction.
               {!state.angel?.connected && (
                 <span className="block mt-2 text-red-600 font-semibold" data-testid="start-not-ready-note">
                   ⚠ Angel One is disconnected — connect it first or no orders can be placed.

@@ -3,8 +3,14 @@
 ## Original Problem Statement
 Algo trading bot that places real orders on the user's Angel One account using a
 Renko strategy. Brick size 50, 1-minute timeframe, NIFTY Future lot (qty 65),
-carry-forward. Entry: short when 2 red bricks form. Exit: <=4 reds → exit on 1st
-green; >4 reds → wait for 2 greens.
+carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
+- SHORT: enter on 2 red bricks; exit (BUY/cover) on 1st green if down-run ≤4 reds,
+  else wait for 2 greens.
+- LONG: enter on 2 green bricks; exit (SELL) on 1st red if up-run ≤4 greens,
+  else wait for 2 reds.
+- One position at a time; flips to the opposite side immediately when the opposite
+  2-brick entry condition is met after an exit.
+(Originally short-only; changed to symmetric per user request.)
 
 ## Product Requirements
 - Real money execution only (no demo/simulation).
@@ -131,3 +137,23 @@ green; >4 reds → wait for 2 greens.
     env values.
 - FOLLOW-UP: `engine.py` (1498 lines, the TradingEngine class) is cohesive but could be split
   further (renko/strategy vs. leadership vs. backtest vs. reconciliation) in a later pass.
+
+- 2026-07-10 — SYMMETRIC LONG+SHORT STRATEGY (real-money engine change, live engine + recon only;
+  backtest module intentionally left short-only for now):
+  * `engine.py::_process_brick` rewritten: SHORT on 2 reds AND LONG on 2 greens; exit on 1st
+    opposite brick when the trend-run ≤ max_red_single_green, else wait greens_to_exit_extended
+    opposite bricks. Flips to the opposite side immediately after an exit when the 2-brick setup
+    is met (never both sides at once).
+  * `_apply_fill` (side + P&L sign), `_update_unrealized` (side-aware), `_force_exit`
+    (BUY to cover short / SELL to close long) generalised to both directions.
+  * `_maybe_enter_on_start` now replays bricks via new `_replay_position()` to catch up to the
+    correct side on Start (both directions).
+  * Reconciliation & adoption now support LONG too (`reconcile` bot_open, `reconcile_resolve`
+    reenter/reexit/accept side-aware, `adopt_position` accepts LONG, `_on_start` /
+    `_market_open_reconcile` surface any non-zero broker qty for adoption).
+  * Expiry position-rollover re-opens the SAME side that was squared off (`_rollover_side`).
+  * Frontend `OpenPositionPanel` is side-aware (green LONG / red SHORT); start-confirm and
+    reconcile copy updated for both directions.
+  * Tests: new `tests/test_symmetric_strategy.py` (11 passing, broker mocked — NO real orders);
+    updated `test_adopt_on_start.py` LONG cases to the new adoptable behaviour. Existing
+    in-process engine tests (adopt/reconcile) pass. NOTE: needs a PRODUCTION REDEPLOY to go live.
