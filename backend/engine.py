@@ -376,16 +376,15 @@ class TradingEngine:
                           or (held_side == "LONG" and color == "green")):
             self.down_run_reds += 1
 
-        # ---- EXIT: opposite brick(s) against an open position ----
+        # ---- EXIT: the FIRST opposite brick always closes the position (capture the move
+        # early), no matter how long the favourable run was. ----
         if self.position and not self.pending_exit:
-            need = self.settings["greens_to_exit_extended"] \
-                if self.down_run_reds >= self.settings["max_red_single_green"] else 1
-            if self.position["side"] == "SHORT" and color == "green" and self.consec_green >= need:
+            if self.position["side"] == "SHORT" and color == "green":
                 self.pending_exit = True
                 brick["signal"] = "COVER"
                 asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, brick["index"]))
                 return
-            if self.position["side"] == "LONG" and color == "red" and self.consec_red >= need:
+            if self.position["side"] == "LONG" and color == "red":
                 self.pending_exit = True
                 brick["signal"] = "EXIT_LONG"
                 asyncio.create_task(self._execute_order("SELL", "EXIT", self.price, brick["index"]))
@@ -732,8 +731,6 @@ class TradingEngine:
         already in progress (no orders placed here)."""
         cr = cg = run = 0
         side = None
-        max_red = self.settings["max_red_single_green"]
-        greens_ext = self.settings["greens_to_exit_extended"]
         for b in self.bricks:
             if b["color"] == "red":
                 cr += 1; cg = 0
@@ -743,10 +740,10 @@ class TradingEngine:
             if side:
                 if (side == "SHORT" and b["color"] == "red") or (side == "LONG" and b["color"] == "green"):
                     run += 1
-                need = greens_ext if run >= max_red else 1
-                if side == "SHORT" and b["color"] == "green" and cg >= need:
+                # exit on the FIRST opposite brick
+                if side == "SHORT" and b["color"] == "green":
                     side = None; run = 0; exited = True
-                elif side == "LONG" and b["color"] == "red" and cr >= need:
+                elif side == "LONG" and b["color"] == "red":
                     side = None; run = 0; exited = True
             if side is None and not exited:
                 if b["color"] == "red" and cr >= 2:

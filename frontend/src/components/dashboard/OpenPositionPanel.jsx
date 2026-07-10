@@ -7,8 +7,6 @@ export function OpenPositionPanel({ pos, state, m, squareOff }) {
   const isLong = pos?.side === "LONG";
   const runTrend = isLong ? "Greens" : "Reds";
   const exitBrick = isLong ? "red" : "green";
-  const needTwo = state.down_run_reds > state.settings.max_red_single_green;
-  const exitCount = needTwo ? state.settings.greens_to_exit_extended : 1;
   return (
           <Widget title="Open Position" testid="position-widget" icon={<TrendingDown className="h-3.5 w-3.5 text-slate-500" />}>
             {pos ? (
@@ -27,7 +25,7 @@ export function OpenPositionPanel({ pos, state, m, squareOff }) {
                   <p className="font-mono text-[10px] uppercase text-slate-400">Unrealized P&L</p>
                   <p className={`font-mono text-xl font-bold ${pnlClass(m.unrealized_pnl)}`} data-testid="unrealized-pnl">{sign(m.unrealized_pnl)}{fmt(m.unrealized_pnl)}</p>
                 </div>
-                <p className="font-mono text-[10px] text-slate-400 mt-2">{runTrend} in run: {state.down_run_reds} · exit on {exitCount} {exitBrick}{exitCount > 1 ? "s" : ""}</p>
+                <p className="font-mono text-[10px] text-slate-400 mt-2">{runTrend} in run: {state.down_run_reds} · exit on 1st {exitBrick} brick</p>
                 <button onClick={squareOff} data-testid="square-off-button"
                   className={`w-full mt-3 border font-mono uppercase text-[11px] tracking-wider px-3 py-1.5 transition-colors flex items-center justify-center gap-2 ${isLong ? "border-emerald-300 hover:bg-emerald-100 text-emerald-700" : "border-red-300 hover:bg-red-100 text-red-700"}`}>
                   <XCircle className="h-3.5 w-3.5" /> Square off now

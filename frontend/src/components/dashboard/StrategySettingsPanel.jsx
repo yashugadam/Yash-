@@ -10,7 +10,6 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
                   ["Brick Size", "brick_size"], ["Bar Secs", "bar_seconds"],
                   ["Lot Size", "lot_size"], ["Buffer (pt)", "buffer_points"],
                   ["Max Slip (pt)", "max_slippage"], ["Expiry Slip (pt)", "forced_exit_slippage"],
-                  ["Max Reds→1G", "max_red_single_green"], ["Greens (ext)", "greens_to_exit_extended"],
                   ["Day Max Loss ₹", "daily_max_loss"],
                 ].map(([label, key]) => (
                   <div key={key}>
@@ -23,7 +22,7 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
                 ))}
               </div>
               <label className="flex items-center justify-between gap-2 mt-3 cursor-pointer select-none" data-testid="rollover-toggle-label">
-                <span className="font-mono text-[10px] uppercase text-slate-500">Position rollover at expiry<br /><span className="text-slate-400 normal-case">re-open short on next month after square-off</span></span>
+                <span className="font-mono text-[10px] uppercase text-slate-500">Position rollover at expiry<br /><span className="text-slate-400 normal-case">re-open same side on next month after square-off</span></span>
                 <input type="checkbox" checked={!!form.rollover_position} disabled={state.running}
                   onChange={(e) => setForm({ ...form, rollover_position: e.target.checked })}
                   className="h-4 w-4 accent-slate-900 disabled:opacity-40" data-testid="setting-rollover_position" />

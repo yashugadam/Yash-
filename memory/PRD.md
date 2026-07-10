@@ -4,13 +4,13 @@
 Algo trading bot that places real orders on the user's Angel One account using a
 Renko strategy. Brick size 50, 1-minute timeframe, NIFTY Future lot (qty 65),
 carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
-- SHORT: enter on 2 red bricks; exit (BUY/cover) on 1st green if down-run ≤4 reds,
-  else wait for 2 greens.
-- LONG: enter on 2 green bricks; exit (SELL) on 1st red if up-run ≤4 greens,
-  else wait for 2 reds.
+- SHORT: enter on 2 red bricks; exit (BUY/cover) on the 1st green brick.
+- LONG: enter on 2 green bricks; exit (SELL) on the 1st red brick.
+- Exit is always the FIRST opposite brick regardless of run length (simplified from the
+  earlier ≤4 / >4 rule to capture moves earlier).
 - One position at a time; flips to the opposite side immediately when the opposite
   2-brick entry condition is met after an exit.
-(Originally short-only; changed to symmetric per user request.)
+(Originally short-only; changed to symmetric, then simplified exit to 1st-opposite-brick.)
 
 ## Product Requirements
 - Real money execution only (no demo/simulation).

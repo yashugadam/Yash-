@@ -75,7 +75,7 @@ def test_short_exit_first_green_when_run_le_4():
     asyncio.run(scenario())
 
 
-def test_short_needs_two_greens_when_run_gt_4():
+def test_short_exit_first_green_even_after_long_run():
     async def scenario():
         eng = _fresh()
         eng.position = {"side": "SHORT", "qty": 65, "entry_price": 100.0,
@@ -83,11 +83,9 @@ def test_short_needs_two_greens_when_run_gt_4():
                         "reds_at_entry": 5, "unrealized_pnl": 0.0}
         eng.down_run_reds = 5
         eng.consec_red = 5
-        calls = await _feed(eng, ["green"])   # 1st green -> NO exit
-        assert calls == []
-        assert eng.pending_exit is False
-        calls = await _feed(eng, ["green"])   # 2nd green -> exit
+        calls = await _feed(eng, ["green"])   # 1st green -> exit regardless of run length
         assert calls == [("BUY", "EXIT")]
+        assert eng.pending_exit is True
     asyncio.run(scenario())
 
 
@@ -117,7 +115,7 @@ def test_long_exit_first_red_when_run_le_4():
     asyncio.run(scenario())
 
 
-def test_long_needs_two_reds_when_run_gt_4():
+def test_long_exit_first_red_even_after_long_run():
     async def scenario():
         eng = _fresh()
         eng.position = {"side": "LONG", "qty": 65, "entry_price": 100.0,
@@ -125,9 +123,7 @@ def test_long_needs_two_reds_when_run_gt_4():
                         "reds_at_entry": 5, "unrealized_pnl": 0.0}
         eng.down_run_reds = 5
         eng.consec_green = 5
-        calls = await _feed(eng, ["red"])
-        assert calls == []
-        calls = await _feed(eng, ["red"])
+        calls = await _feed(eng, ["red"])   # 1st red -> exit regardless of run length
         assert calls == [("SELL", "EXIT")]
     asyncio.run(scenario())
 
