@@ -367,9 +367,8 @@ class TradingEngine:
             self.consec_green += 1
             self.consec_red = 0
 
-        # Deepen the trend-run the current (or pending) position is riding. This run length
-        # picks the exit rule: run <= max_red_single_green favourable bricks -> exit on the
-        # 1st opposite brick; a longer run -> wait for greens_to_exit_extended opposite bricks.
+        # Deepen the trend-run the current (or pending) position is riding (informational only —
+        # the exit no longer depends on run length; the 1st opposite brick always exits).
         held_side = self.position["side"] if self.position \
             else (self._entry_side if self.pending_entry else None)
         if held_side and ((held_side == "SHORT" and color == "red")
