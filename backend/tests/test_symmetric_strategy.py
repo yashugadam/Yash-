@@ -4,6 +4,7 @@ directly with a mocked order executor, so no broker calls or real orders happen.
 import os
 import sys
 import asyncio
+import contextlib
 import importlib
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -209,3 +210,73 @@ def test_replay_position_reversal_flat():
     side, run, cr, cg = eng._replay_position()
     # after exiting the short on 1st green, 2nd green -> LONG entry
     assert side == "LONG"
+
+
+# ---------------------------------------------------------------- gap flip (immediate reversal)
+def _wire_fills(eng):
+    """Patches so _execute_order runs end-to-end without a real broker: _live_fill always
+    fills at ref_price, idempotency/save/persist are no-ops, entries not blocked."""
+    eng.broker.connected = True
+
+    async def fake_live_fill(order, *a, **k):
+        order["fill_price"] = order["ref_price"]
+        return True
+
+    return [
+        patch.object(eng, "_live_fill", side_effect=fake_live_fill),
+        patch.object(eng, "_claim_order_key", new=AsyncMock(return_value=True)),
+        patch.object(eng, "_save_order", new=AsyncMock()),
+        patch.object(eng, "_save_trade", new=AsyncMock()),
+        patch.object(eng, "_persist_state", new=AsyncMock()),
+        patch.object(eng, "_entries_blocked", return_value=False),
+    ]
+
+
+def _long_pos(eng):
+    eng.price = 100.0
+    eng.position = {"side": "LONG", "qty": 65, "entry_price": 110.0, "entry_time": "t",
+                    "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+
+
+def test_gap_flip_long_to_short_after_exit_fill():
+    """Gap down prints 2+ reds at once: after the long's exit FILLS, the bot flips SHORT
+    immediately (no waiting for a new brick)."""
+    async def scenario():
+        eng = _fresh()
+        _long_pos(eng)
+        eng.consec_red = 2   # gap already printed 2 reds
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "EXIT", 100.0, 5)  # strategy exit (reason SIGNAL)
+        assert eng.position is not None
+        assert eng.position["side"] == "SHORT"
+    asyncio.run(scenario())
+
+
+def test_no_flip_on_single_opposite_brick():
+    """Normal (non-gap) exit on a single red -> just goes flat, no immediate short."""
+    async def scenario():
+        eng = _fresh()
+        _long_pos(eng)
+        eng.consec_red = 1
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "EXIT", 100.0, 5)
+        assert eng.position is None
+    asyncio.run(scenario())
+
+
+def test_forced_exit_does_not_flip():
+    """A forced exit (manual square-off / expiry / breaker) must NOT auto-reenter, even in a gap."""
+    async def scenario():
+        eng = _fresh()
+        _long_pos(eng)
+        eng.consec_red = 2
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "EXIT", 100.0, -1, "MANUAL_SQUAREOFF")
+        assert eng.position is None
+    asyncio.run(scenario())

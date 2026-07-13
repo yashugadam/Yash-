@@ -438,6 +438,7 @@ class TradingEngine:
 
     async def _execute_order(self, side, kind, ref_price, brick_index, reason="SIGNAL"):
         # Duplicate-order protection: only one order in-flight; re-validate inside the lock.
+        flip_side = None
         async with self.order_lock:
             if kind == "ENTRY" and self.position is not None:
                 logger.warning("Duplicate ENTRY dropped - position already open")
@@ -518,6 +519,20 @@ class TradingEngine:
                 if kind == "EXIT":
                     self.forced_exit_pending = False
                 self._apply_fill(order)
+                # GAP FLIP: if a strategy exit just filled and the market has ALREADY printed
+                # >=2 consecutive opposite bricks (e.g. a gap up/down), open the reversal now —
+                # don't wait for another brick. Skipped for forced exits (expiry/breaker/manual)
+                # and while entries are blocked.
+                if kind == "EXIT" and reason == "SIGNAL" and self.position is None \
+                        and not self.pending_entry and not self._entries_blocked():
+                    if self.consec_red >= 2:
+                        self._entry_side, flip_side = "SHORT", "SELL"
+                        self.down_run_reds = self.consec_red
+                        self.pending_entry = True
+                    elif self.consec_green >= 2:
+                        self._entry_side, flip_side = "LONG", "BUY"
+                        self.down_run_reds = self.consec_green
+                        self.pending_entry = True
             else:
                 order["status"] = "REJECTED"
                 if not order.get("note", "").startswith(("LIVE", "Broker")):
@@ -534,6 +549,10 @@ class TradingEngine:
                                     f"Position still OPEN — auto-retrying (throttled).", "error")
             asyncio.create_task(self._save_order(order))
         asyncio.create_task(self._persist_state())
+        if flip_side:
+            self._set_alert(f"Gap reversal — market already made 2+ opposite bricks; "
+                            f"flipping to {self._entry_side} immediately after exit.", "info")
+            await self._execute_order(flip_side, "ENTRY", self.price, -1, "GAP_FLIP")
 
     def _set_alert(self, msg, level="info"):
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
