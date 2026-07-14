@@ -415,14 +415,18 @@ class TradingEngine:
         return self.price
 
     def _order_key(self, kind, reason, brick_index):
-        """Deterministic client order id. A brick-triggered signal (ENTRY / green-brick EXIT)
+        """Deterministic client order id. A brick-triggered signal (ENTRY / opposite-brick EXIT)
         fires exactly once for a given brick, so two pods computing it produce the SAME key ->
         the duplicate is suppressed. Retries / forced exits (no brick) use an 8s dedup window,
-        so a genuine sequential retry (>=15s later) still goes through."""
+        so a genuine sequential retry (>=15s later) still goes through. The contract token is
+        included so a brick_seq reset after a rollover/instrument change cannot collide with an
+        earlier same-day key (token is resolved identically on every pod, so cross-pod dedup
+        still holds)."""
         today = datetime.now(IST).date().isoformat()
+        tok = str(getattr(self.broker, "fut_token", "") or "")
         if brick_index is not None and brick_index >= 0:
-            return f"{kind}:{today}:b{brick_index}"
-        return f"{kind}:{reason}:{today}:t{int(time.time() // 8)}"
+            return f"{kind}:{today}:{tok}:b{brick_index}"
+        return f"{kind}:{reason}:{today}:{tok}:t{int(time.time() // 8)}"
 
     async def _claim_order_key(self, key):
         """Persist the client order id BEFORE the broker call. Returns True if this order may
@@ -452,6 +456,14 @@ class TradingEngine:
             if kind == "EXIT" and reason != "EXIT_RETRY":
                 self._exit_retry_count = 0
 
+            # Size EXIT orders to the ACTUAL open quantity — a reconciled/adopted or
+            # carry-forward position may be more than one lot, so exiting only lot_size would
+            # leave a naked remainder (bot thinks flat while the broker still holds qty).
+            # ENTRY orders are always exactly one lot. Never exceed the hard safety cap.
+            order_qty = self.settings["lot_size"] if kind == "ENTRY" \
+                else int(self.position["qty"])
+            order_qty = max(1, min(int(order_qty), MAX_ORDER_QTY))
+
             base = self.settings["buffer_points"]
             forced = reason in ("EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF",
                                 "RECONCILE_REEXIT") \
@@ -466,7 +478,7 @@ class TradingEngine:
 
             order = {
                 "id": str(uuid.uuid4()), "side": side, "kind": kind, "reason": reason,
-                "qty": self.settings["lot_size"], "symbol": self.settings["symbol"],
+                "qty": order_qty, "symbol": self.settings["symbol"],
                 "order_type": "LIMIT", "ref_price": round(ref_price, 2),
                 "limit_price": None, "status": "PENDING", "attempts": 0,
                 "brick_index": brick_index, "time": now_iso(), "fill_price": None,
@@ -564,7 +576,7 @@ class TradingEngine:
         One broker order id is kept and modified across retries to avoid double fills;
         if it gets rejected/cancelled we place a fresh one. Unfilled orders are cancelled."""
         angel_side = "SELL" if side == "SELL" else "BUY"
-        qty = self.settings["lot_size"]
+        qty = order["qty"]
         broker_id = None
         for attempt in range(1, max_attempts + 1):
             buffer = min(base + (attempt - 1) * 5, cap)

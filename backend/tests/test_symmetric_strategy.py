@@ -280,3 +280,105 @@ def test_forced_exit_does_not_flip():
             await eng._execute_order("SELL", "EXIT", 100.0, -1, "MANUAL_SQUAREOFF")
         assert eng.position is None
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------- exit sizing (reconciled/adopted)
+def test_exit_order_sizes_to_actual_position_qty():
+    """A reconciled/adopted position larger than one lot (e.g. 130) must be exited in FULL,
+    not just lot_size, or a naked remainder is left behind."""
+    async def scenario():
+        eng = _fresh()
+        eng.price = 100.0
+        eng.position = {"side": "SHORT", "qty": 130, "entry_price": 110.0, "entry_time": "t",
+                        "entry_order_id": "ADOPTED_MANUAL", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        eng.consec_green = 1   # not enough for a gap-flip re-entry
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("BUY", "EXIT", 100.0, 5)
+        exit_orders = [o for o in eng.orders if o["kind"] == "EXIT"]
+        assert exit_orders and exit_orders[0]["qty"] == 130
+        assert eng.position is None
+    asyncio.run(scenario())
+
+
+def test_entry_order_is_always_one_lot():
+    async def scenario():
+        eng = _fresh()
+        eng.price = 100.0
+        eng.settings["lot_size"] = 65
+        eng.consec_red = 2
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "ENTRY", 100.0, 3)
+        entry_orders = [o for o in eng.orders if o["kind"] == "ENTRY"]
+        assert entry_orders and entry_orders[0]["qty"] == 65
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------- broker net-qty across rows
+def test_get_net_position_sums_across_producttype_rows():
+    from angel_broker import AngelBroker
+
+    class FakeSmart:
+        def position(self):
+            return {"status": True, "data": [
+                {"symboltoken": "111", "producttype": "CARRYFORWARD", "netqty": "-65", "avgnetprice": "24000"},
+                {"symboltoken": "111", "producttype": "INTRADAY", "netqty": "-65", "avgnetprice": "24010"},
+                {"symboltoken": "999", "producttype": "CARRYFORWARD", "netqty": "-300", "avgnetprice": "1"},
+            ]}
+
+    b = AngelBroker()
+    b.smart = FakeSmart()
+    b.fut_token = "111"
+    res = b.get_net_position()
+    assert res["found"] is True
+    assert res["netqty"] == -130   # both rows for token 111 summed; token 999 ignored
+
+
+def test_get_net_position_single_row_unchanged():
+    from angel_broker import AngelBroker
+
+    class FakeSmart:
+        def position(self):
+            return {"status": True, "data": [
+                {"symboltoken": "111", "producttype": "CARRYFORWARD", "netqty": "-65", "avgnetprice": "24000"},
+            ]}
+
+    b = AngelBroker()
+    b.smart = FakeSmart()
+    b.fut_token = "111"
+    res = b.get_net_position()
+    assert res["netqty"] == -65
+
+
+def test_get_net_position_dedups_duplicate_producttype_rows():
+    """If Angel returns duplicate identical rows (same producttype), they must NOT be double-counted."""
+    from angel_broker import AngelBroker
+
+    class FakeSmart:
+        def position(self):
+            return {"status": True, "data": [
+                {"symboltoken": "111", "producttype": "CARRYFORWARD", "netqty": "-65", "avgnetprice": "24000"},
+                {"symboltoken": "111", "producttype": "CARRYFORWARD", "netqty": "-65", "avgnetprice": "24000"},
+            ]}
+
+    b = AngelBroker()
+    b.smart = FakeSmart()
+    b.fut_token = "111"
+    res = b.get_net_position()
+    assert res["netqty"] == -65   # deduped by producttype, not -130
+
+
+# ---------------------------------------------------------------- idempotency key includes token
+def test_order_key_includes_contract_token():
+    eng = _fresh()
+    eng.broker.fut_token = "AAA"
+    k1 = eng._order_key("ENTRY", "SIGNAL", 3)
+    eng.broker.fut_token = "BBB"   # e.g. after a rollover to next-month contract
+    k2 = eng._order_key("ENTRY", "SIGNAL", 3)
+    assert k1 != k2, "same brick index on different contracts must not share an order key"
+    # same token + same brick -> identical key (cross-pod dedup preserved)
+    eng.broker.fut_token = "AAA"
+    assert eng._order_key("ENTRY", "SIGNAL", 3) == k1

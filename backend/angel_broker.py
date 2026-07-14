@@ -1,9 +1,9 @@
 """Angel One SmartAPI broker wrapper.
 
-LIVE DATA + PAPER orders: this module logs in and streams the real NIFTY
-futures LTP. Order placement is intentionally NOT wired to real placeOrder yet
-(the bot stays in paper/demo mode). All calls are synchronous (requests-based)
-and must be invoked from the engine via asyncio.to_thread.
+LIVE DATA + LIVE ORDERS (REAL MONEY): this module logs in, streams the real NIFTY
+futures LTP via SmartWebSocketV2, and places REAL CARRYFORWARD LIMIT orders through
+placeOrder (routed via the external static-IP proxy for SEBI compliance). All calls are
+synchronous (requests-based) and must be invoked from the engine via asyncio.to_thread.
 """
 import logging
 import os
@@ -551,13 +551,29 @@ class AngelBroker:
             try:
                 res = self.smart.position()
                 if res.get("status"):
-                    for p in res.get("data") or []:
-                        tok = str(p.get("symboltoken") or p.get("scripttoken") or "")
-                        if tok == str(self.fut_token):
-                            return {"found": True, "netqty": int(float(p.get("netqty") or 0)),
-                                    "avgprice": float(p.get("avgnetprice") or p.get("netprice")
-                                                      or p.get("openprice") or 0) or None}
-                    return {"found": True, "netqty": 0, "avgprice": None}  # flat for this token
+                    rows = [p for p in (res.get("data") or [])
+                            if str(p.get("symboltoken") or p.get("scripttoken") or "") == str(self.fut_token)]
+                    if not rows:
+                        return {"found": True, "netqty": 0, "avgprice": None}  # flat for this token
+                    # Angel can return several rows for one token (e.g. NRML vs MIS, or day vs
+                    # carry-forward). Sum the net over DISTINCT producttypes so the true net is
+                    # correct and an aggregate/duplicate row is not double-counted.
+                    by_pt = {}
+                    for p in rows:
+                        pt = str(p.get("producttype") or p.get("productType") or "DEFAULT")
+                        by_pt[pt] = int(float(p.get("netqty") or 0))
+                    net = sum(by_pt.values())
+                    # avgprice from the row carrying the largest abs qty (most representative)
+                    best = max(rows, key=lambda p: abs(int(float(p.get("netqty") or 0))))
+                    avg = float(best.get("avgnetprice") or best.get("netprice")
+                                or best.get("openprice") or 0) or None
+                    if len(rows) > 1 or net != int(float(rows[0].get("netqty") or 0)):
+                        logger.info(
+                            "get_net_position token=%s rows=%s -> net=%s", self.fut_token,
+                            [{"pt": str(p.get("producttype")), "netqty": p.get("netqty"),
+                              "buyqty": p.get("buyqty"), "sellqty": p.get("sellqty")} for p in rows],
+                            net)
+                    return {"found": True, "netqty": net, "avgprice": avg}
                 self.error = str(res.get("message") or res)
             except Exception as e:
                 self.error = str(e)

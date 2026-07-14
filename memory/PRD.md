@@ -157,3 +157,26 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Tests: new `tests/test_symmetric_strategy.py` (11 passing, broker mocked — NO real orders);
     updated `test_adopt_on_start.py` LONG cases to the new adoptable behaviour. Existing
     in-process engine tests (adopt/reconcile) pass. NOTE: needs a PRODUCTION REDEPLOY to go live.
+- 2026-07-14 — GAP FLIP + CODE-REVIEW FIXES (real-money engine):
+  * Gap flip: after a strategy EXIT fills, if the market has ALREADY printed >=2 consecutive
+    opposite bricks (gap up/down), the reversal is opened immediately (no waiting for a new
+    brick). Fires only after the exit fill is confirmed, outside order_lock (no deadlock),
+    excluded for forced exits (expiry/breaker/manual), and guarded by idempotency + entries-blocked.
+  * FIX (HIGH): EXIT orders now size to the ACTUAL open position qty (`self.position["qty"]`),
+    not hard-coded lot_size. Previously an adopted/reconciled/carry-forward position >1 lot
+    (e.g. 130) was only covered 65, leaving a naked remainder while the bot thought it was flat —
+    a later signal re-opened 65 -> back to 130. This is the likely root cause of the reported
+    "broker net qty 130 vs 65". ENTRY orders remain exactly one lot. Capped at MAX_ORDER_QTY.
+  * FIX (HIGH): `angel_broker.get_net_position` now SUMS netqty across all rows for the token,
+    deduped by producttype (NRML/MIS/day/carry-forward), instead of returning only the first row;
+    logs the raw rows once for diagnosis.
+  * FIX (MEDIUM): idempotency order key now includes the contract token so a brick_seq reset
+    after a rollover/instrument change cannot collide with an earlier same-day key (still
+    deterministic across pods, so cross-pod dedup holds).
+  * FIX (LOW): corrected the stale angel_broker.py header that wrongly said orders were PAPER/not
+    wired — they are REAL CARRYFORWARD LIMIT orders.
+  * Tests: `tests/test_symmetric_strategy.py` now 20 passing (added gap-flip x3, exit-sizing x2,
+    get_net_position multi-row/dedup x3, order-key-token x1). adopt/reconcile/rollover in-process
+    tests pass. Remaining failures are the pre-existing `test_api_*`/`TestSettingsAPI` 401 auth tests.
+    Needs a PRODUCTION REDEPLOY to go live. No real orders placed in dev.
+
