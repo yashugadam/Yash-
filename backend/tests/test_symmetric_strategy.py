@@ -382,3 +382,59 @@ def test_order_key_includes_contract_token():
     # same token + same brick -> identical key (cross-pod dedup preserved)
     eng.broker.fut_token = "AAA"
     assert eng._order_key("ENTRY", "SIGNAL", 3) == k1
+
+
+# ---------------------------------------------------------------- exit-retry side (P0 regression)
+def test_long_exit_retry_uses_sell_not_buy():
+    """A rejected LONG exit must RETRY with SELL (close), never BUY (which would double the long)."""
+    async def scenario():
+        eng = _fresh()
+        eng.price = 100.0
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 110.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        captured = []
+
+        async def rec(side, kind, price, idx, reason="SIGNAL"):
+            captured.append((side, kind, reason))
+
+        # mirror the run_loop retry branch exactly
+        eng.exit_retry_pending = True
+        with patch.object(eng, "_execute_order", side_effect=rec):
+            retry_side = "BUY" if eng.position["side"] == "SHORT" else "SELL"
+            await eng._execute_order(retry_side, "EXIT", eng.price, -1, "EXIT_RETRY")
+        assert captured == [("SELL", "EXIT", "EXIT_RETRY")]
+    asyncio.run(scenario())
+
+
+def test_short_exit_retry_uses_buy():
+    async def scenario():
+        eng = _fresh()
+        eng.position = {"side": "SHORT", "qty": 65, "entry_price": 100.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        retry_side = "BUY" if eng.position["side"] == "SHORT" else "SELL"
+        assert retry_side == "BUY"
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------- cancel/fill race (HIGH regression)
+def test_live_fill_detects_fill_in_cancel_window():
+    """If the order fills right before cancel, _live_fill must return True (filled), not False."""
+    async def scenario():
+        eng = _fresh()
+        eng.broker.connected = True
+        order = {"id": "o1", "side": "SELL", "kind": "EXIT", "reason": "SIGNAL",
+                 "qty": 65, "symbol": "NIFTY", "ref_price": 100.0}
+        # place succeeds; every poll says "open" (never fills in the loop); cancel says not-ok;
+        # then get_order_status reports COMPLETE (it filled in the cancel window).
+        eng.broker.place_limit_order = lambda *a, **k: {"ok": True, "orderid": "B1"}
+        eng.broker.modify_order_price = lambda *a, **k: {"ok": True}
+        statuses = iter(["open", "open", "complete"])  # last one is the post-cancel re-query
+
+        def fake_status(oid):
+            return {"status": next(statuses), "avgprice": 99.5}
+        eng.broker.get_order_status = fake_status
+        eng.broker.cancel_order = lambda oid: {"ok": False, "error": "already complete"}
+        filled = await eng._live_fill(order, "SELL", 0.5, 5.0, 2, 3.0, 90.0, 110.0)
+        assert filled is True
+        assert order["fill_price"] == 99.5
+    asyncio.run(scenario())

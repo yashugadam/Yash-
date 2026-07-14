@@ -615,6 +615,15 @@ class TradingEngine:
                 await asyncio.sleep(max(retry_secs - 2.0, 1.0))
         if broker_id:   # cancel the dangling working order so it can't fill later unexpectedly
             await asyncio.to_thread(self.broker.cancel_order, broker_id)
+            # Race guard: the order may have filled in the moment before/at cancel. Re-read the
+            # status; if it actually completed, treat it as FILLED (don't report a false reject —
+            # that would desync bot vs broker and could trigger a wrong extra order).
+            st = await asyncio.to_thread(self.broker.get_order_status, broker_id)
+            s = (st.get("status") or "").lower()
+            if "complet" in s or "filled" in s or "executed" in s:
+                order["fill_price"] = st.get("avgprice") or limit
+                order["note"] = f"LIVE filled @ {order['fill_price']} just before cancel (order {broker_id})"
+                return True
             order["note"] = f"LIVE not filled in {max_attempts} tries - order {broker_id} cancelled"
         return False
 
@@ -1452,7 +1461,10 @@ class TradingEngine:
                                         self._last_exit_retry = time.time()
                                         self._exit_retry_count += 1
                                         self.pending_exit = True
-                                        asyncio.create_task(self._execute_order("BUY", "EXIT", self.price, -1, "EXIT_RETRY"))
+                                        # side depends on the OPEN position: BUY covers a short,
+                                        # SELL closes a long. (Hard-coding BUY would DOUBLE a long.)
+                                        retry_side = "BUY" if self.position["side"] == "SHORT" else "SELL"
+                                        asyncio.create_task(self._execute_order(retry_side, "EXIT", self.price, -1, "EXIT_RETRY"))
                     else:
                         # Market CLOSED: freeze the strategy entirely. No new bricks, no
                         # exits, no circuit-breaker action — the open position is held

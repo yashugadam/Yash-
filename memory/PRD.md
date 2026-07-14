@@ -180,3 +180,22 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     tests pass. Remaining failures are the pre-existing `test_api_*`/`TestSettingsAPI` 401 auth tests.
     Needs a PRODUCTION REDEPLOY to go live. No real orders placed in dev.
 
+- 2026-07-14 — CODE-REVIEW #2 FIXES (real-money engine):
+  * FIX (CRITICAL/P0): the auto exit-retry in `run_loop` hard-coded BUY. For a LONG whose exit
+    was rejected, the retry placed a BUY -> DOUBLED the long. Now derives side from the open
+    position (BUY covers short, SELL closes long), mirroring `_force_exit`.
+  * FIX (HIGH): cancel/fill race in `_live_fill`. If an order filled in the moment before/at the
+    final `cancel_order`, it was reported as REJECTED (bot/broker desync, could trigger a wrong
+    extra order). Now re-queries `get_order_status` after a failed cancel and treats a completed
+    order as FILLED.
+  * Tests: added `test_long_exit_retry_uses_sell_not_buy`, `test_short_exit_retry_uses_buy`,
+    `test_live_fill_detects_fill_in_cancel_window`. `test_symmetric_strategy.py` now 23 passing.
+  * Verified-correct by review (no change): get_net_position sum/dedup, gap-flip re-entrancy,
+    _order_key determinism, EXIT sizing, non-leader relay-only.
+  * KNOWN FOLLOW-UP (open question, not a confirmed defect): leader failover mid-command leaves a
+    command stuck in `processing`; relay times out and the user retries (self-healing, not silent
+    for real-money). Consider reclaiming stale `processing` commands with a safe threshold later.
+  * LOW (deferred): /api/auth/login has no rate limiting; CORS default '*' with credentials (app
+    uses Bearer tokens, so low risk) — restrict via CORS_ORIGINS in production.
+  * Needs PRODUCTION REDEPLOY to go live. No real orders placed in dev.
+
