@@ -39,6 +39,7 @@ async def _relay(ctype, payload=None, timeout=12.0):
 # ----------------------------- API -----------------------------
 class SettingsUpdate(BaseModel):
     brick_size: Optional[int] = Field(None, ge=1, le=2000)
+    macro_mult: Optional[int] = Field(None, ge=0, le=10)
     bar_seconds: Optional[int] = Field(None, ge=1, le=3600)
     lot_size: Optional[int] = Field(None, ge=1, le=MAX_ORDER_QTY)
     buffer_points: Optional[float] = Field(None, ge=0, le=2000)

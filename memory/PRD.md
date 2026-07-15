@@ -199,3 +199,19 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     uses Bearer tokens, so low risk) — restrict via CORS_ORIGINS in production.
   * Needs PRODUCTION REDEPLOY to go live. No real orders placed in dev.
 
+
+- 2026-07-15 — MACRO TREND FILTER (advanced whipsaw-reduction strategy):
+  * Backtest (2yr NIFTY index proxy, ₹200/trade, 65 qty) confirmed a multi-timeframe Renko
+    macro filter reduces whipsaws. bs50 baseline: 446 trades / 41.7% win / PF 2.51 / DD -48,100.
+    bs50 + macro×2: 344 trades (-23%) / 45.3% win / PF 2.89 / DD -41,200 (chosen default).
+  * ENGINE: added `_feed_macro_close()` building a larger Renko (brick_size × macro_mult) from the
+    same closes; tracks `macro_dir` (+1 up / -1 down / 0 forming). `_process_brick` now gates
+    entries: longs only when macro_dir>0, shorts only when macro_dir<0. macro_mult=0 => filter OFF
+    (default). Setting change/toggle rebuilds macro trend from existing bricks (no cold-start).
+    macro state persisted in engine_state and reset on rollover/select-instrument/reset.
+  * SETTINGS: new `macro_mult` field (0-10) in SettingsUpdate + engine settings. /api/state exposes
+    `macro_dir` and `macro_mult`.
+  * UI: StrategySettingsPanel has a "Macro trend filter" toggle (on => macro_mult 2, off => 0), a
+    macro-multiplier input, and a live macro-trend indicator (UP/DOWN/forming).
+  * TESTS: 7 new macro tests; `test_symmetric_strategy.py` now 30 passing.
+  * DEFAULT: filter OFF (manual toggle per user). Needs PRODUCTION REDEPLOY to go live.

@@ -182,6 +182,7 @@ export default function Dashboard({ onLogout }) {
       max_red_single_green: Number(form.max_red_single_green),
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
       daily_max_loss: Number(form.daily_max_loss),
+      macro_mult: Number(form.macro_mult) || 0,
       rollover_position: !!form.rollover_position,
     });
     toast.success("Strategy parameters updated");

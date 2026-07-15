@@ -22,6 +22,10 @@ class TradingEngine:
         self.settings = {
             "symbol": "NIFTY FUT",
             "brick_size": 50,
+            "macro_mult": 0,               # >0 enables the multi-timeframe MACRO TREND FILTER:
+                                           # a larger Renko at brick_size*macro_mult defines the
+                                           # dominant trend; only aligned entries are taken (longs
+                                           # while macro up, shorts while macro down). 0 = OFF.
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
@@ -59,6 +63,9 @@ class TradingEngine:
         self.ticks_in_bar = 0         # ticks accumulated in the current bar
         self.bricks: List[Dict[str, Any]] = []
         self.brick_seq = 0
+        # macro trend filter (multi-timeframe Renko built from the same closes)
+        self.macro_anchor = None
+        self.macro_dir = 0            # +1 macro-up, -1 macro-down, 0 undetermined
 
         # strategy state
         self.consec_red = 0
@@ -107,6 +114,7 @@ class TradingEngine:
     # a REVERSAL needs a 2x brick move (the first opposite brick prints only after 2 boxes).
     def _feed_close(self, price, ts=None):
         bs = self.settings["brick_size"]
+        self._feed_macro_close(price)
         formed = []
         if self.anchor is None:
             self.anchor = round(price / bs) * bs
@@ -130,6 +138,31 @@ class TradingEngine:
             self.direction = s
             formed.append(self._new_brick("green" if s > 0 else "red", o, c, ts))
         return formed
+
+    # advance the MACRO Renko trend from the same close (larger box = brick_size*macro_mult).
+    # Only tracks direction; no bricks are drawn. macro_dir gates entries in _process_brick.
+    def _feed_macro_close(self, price):
+        mm = int(self.settings.get("macro_mult", 0) or 0)
+        if mm <= 0:
+            self.macro_dir = 0
+            return
+        ms = self.settings["brick_size"] * mm
+        if self.macro_anchor is None:
+            self.macro_anchor = round(price / ms) * ms
+            return
+        n = int((price - self.macro_anchor) / ms)
+        if n == 0:
+            return
+        s = 1 if n > 0 else -1
+        if self.macro_dir == 0 or s == self.macro_dir:
+            count = abs(n)                    # continuation
+        else:
+            if abs(n) < 2:                    # reversal needs a 2x move
+                return
+            count = abs(n) - 1
+            self.macro_anchor += s * ms       # reversal gap
+        self.macro_anchor += s * ms * count
+        self.macro_dir = s
 
     # -------- historical backfill (real Angel One 1-min candles, paginated) --------
     async def load_history(self, days=5, from_date=None):
@@ -174,6 +207,8 @@ class TradingEngine:
         # rebuild the renko chart from real candle closes (no strategy/orders on history)
         self.anchor = None
         self.direction = 0
+        self.macro_anchor = None
+        self.macro_dir = 0
         self.bricks = []
         self.brick_seq = 0
         last_close = None
@@ -453,13 +488,16 @@ class TradingEngine:
         # immediately after an exit once the opposite 2-brick setup is met. If the bot (re)starts
         # mid-trend with a run already > 2, it enters on the next same-colour brick. ----
         if not (self.position or self.pending_entry) and not self._entries_blocked():
-            if color == "red" and self.consec_red >= 2:
+            macro_on = int(self.settings.get("macro_mult", 0) or 0) > 0
+            long_ok = (not macro_on) or self.macro_dir > 0
+            short_ok = (not macro_on) or self.macro_dir < 0
+            if color == "red" and self.consec_red >= 2 and short_ok:
                 self.down_run_reds = self.consec_red
                 self.pending_entry = True
                 self._entry_side = "SHORT"
                 brick["signal"] = "SHORT"
                 asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
-            elif color == "green" and self.consec_green >= 2:
+            elif color == "green" and self.consec_green >= 2 and long_ok:
                 self.down_run_reds = self.consec_green
                 self.pending_entry = True
                 self._entry_side = "LONG"
@@ -1177,6 +1215,7 @@ class TradingEngine:
             "running": self.running, "price": self.price, "mode": self.mode,
             "settings": self.settings,
             "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
+            "macro_anchor": self.macro_anchor, "macro_dir": self.macro_dir,
             "bricks": self.bricks[-800:],
             "consec_red": self.consec_red, "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds, "position": self.position,
@@ -1199,6 +1238,8 @@ class TradingEngine:
             self.settings.update(doc["settings"])
         self.anchor = doc.get("anchor")
         self.direction = doc.get("direction", 0)
+        self.macro_anchor = doc.get("macro_anchor")
+        self.macro_dir = doc.get("macro_dir", 0)
         self.brick_seq = doc.get("brick_seq", 0)
         self.bricks = doc.get("bricks") or []
         self.consec_red = doc.get("consec_red", 0)
@@ -1375,6 +1416,8 @@ class TradingEngine:
             self.settings["instrument_token"] = token
             self.anchor = None
             self.direction = 0
+            self.macro_anchor = None
+            self.macro_dir = 0
             self.bricks = []
             self.brick_seq = 0
             self.consec_red = self.consec_green = self.down_run_reds = 0
@@ -1396,7 +1439,19 @@ class TradingEngine:
             await self._persist_state()
             return {"running": False, "squared_off": squared}
         if ctype == "settings":
-            self.settings.update(payload.get("data") or {})
+            data = payload.get("data") or {}
+            prev_macro = int(self.settings.get("macro_mult", 0) or 0)
+            prev_bs = self.settings.get("brick_size")
+            self.settings.update(data)
+            new_macro = int(self.settings.get("macro_mult", 0) or 0)
+            # If the macro filter was toggled/retuned (or brick size changed), rebuild the macro
+            # trend from existing brick closes so it's immediately valid (no cold-start blackout).
+            if new_macro != prev_macro or self.settings.get("brick_size") != prev_bs:
+                self.macro_anchor = None
+                self.macro_dir = 0
+                if new_macro > 0:
+                    for b in self.bricks:
+                        self._feed_macro_close(b["close"])
             await self._persist_state()
             return {"ok": True, "settings": self.settings, **self.settings}
         if ctype == "adopt":
@@ -1574,6 +1629,8 @@ class TradingEngine:
         self.momentum = 0.0
         self.anchor = None
         self.direction = 0
+        self.macro_anchor = None
+        self.macro_dir = 0
         self.ticks_in_bar = 0
         self.bricks = []
         self.brick_seq = 0
@@ -1624,6 +1681,8 @@ class TradingEngine:
             "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds,
             "direction": self.direction,
+            "macro_dir": self.macro_dir,
+            "macro_mult": int(self.settings.get("macro_mult", 0) or 0),
             "ticks_in_bar": self.ticks_in_bar,
             "orders": self.orders[:12],
             "expiry": {
