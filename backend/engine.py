@@ -241,14 +241,24 @@ class TradingEngine:
     NIFTY_INDEX_TOKEN = "99926000"   # NIFTY 50 index (NSE) — continuous multi-year 1-min history
 
     def _simulate(self, candles, bs, lot, entry_bricks=2, exit_bricks=1,
-                  cost_per_trade=0.0, trend_ema=0, macro_mult=0):
+                  cost_per_trade=0.0, trend_ema=0, macro_mult=0,
+                  lookback=0, range_breakout=False, chop_filter=False,
+                  chop_thr=0.3, structure=False):
         """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
         enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
         bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
         `trend_ema`>0 adds an EMA trend filter on brick closes. `macro_mult`>0 adds a MULTI-
         TIMEFRAME trend filter: a larger Renko at bs*macro_mult defines the dominant trend, and
         only aligned entries are taken (longs while the macro trend is up, shorts while down) —
-        this suppresses counter-trend whipsaws."""
+        this suppresses counter-trend whipsaws.
+
+        PRICE-ACTION FILTERS (all use a `lookback` window of the most recent brick closes):
+        - `range_breakout`: LONG only if the entry close breaks ABOVE the prior swing high, SHORT
+          only if it breaks BELOW the prior swing low (skips entries fired inside a sideways range).
+        - `chop_filter`: block ALL entries while the market is choppy — Kaufman efficiency ratio
+          (net move / total path over the window) must be >= `chop_thr` (trending, not ranging).
+        - `structure`: LONG only if net move over the window is up (close > close `lookback` bricks
+          ago), SHORT only if net move is down (trade with the local structure)."""
         anchor = {"v": None}; direction = {"v": 0}
 
         def make_bricks(state, size):
@@ -282,6 +292,9 @@ class TradingEngine:
         position = None; trades = []
         equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
         ema = None; alpha = (2.0 / (trend_ema + 1)) if trend_ema else 0.0
+        lb = max(0, int(lookback or 0))
+        pa_on = lb > 0 and (range_breakout or chop_filter or structure)
+        hist = []                       # rolling brick closes (prior to the current brick)
 
         for c in candles:
             price = float(c[4])
@@ -317,20 +330,45 @@ class TradingEngine:
                             gross_loss += pnl
                         position = None
 
-                # ENTRY when flat (skip the brick we exited on). Gated by EMA + macro trend.
+                # ENTRY when flat (skip the brick we exited on). Gated by EMA + macro trend +
+                # optional price-action filters (range breakout / chop / structure) on `hist`.
                 if position is None and not exited:
                     long_ok = (not trend_ema or close > ema) and (not macro_mult or macro_dir > 0)
                     short_ok = (not trend_ema or close < ema) and (not macro_mult or macro_dir < 0)
+                    if pa_on:
+                        win = hist[-lb:]
+                        if len(win) < lb:
+                            long_ok = short_ok = False     # not enough history yet
+                        else:
+                            if range_breakout:
+                                long_ok = long_ok and close > max(win)
+                                short_ok = short_ok and close < min(win)
+                            if structure:
+                                long_ok = long_ok and close > win[0]
+                                short_ok = short_ok and close < win[0]
+                            if chop_filter:
+                                seq = win + [close]
+                                path = sum(abs(seq[i] - seq[i - 1]) for i in range(1, len(seq)))
+                                er = abs(seq[-1] - seq[0]) / path if path else 0.0
+                                if er < chop_thr:
+                                    long_ok = short_ok = False
                     if b["color"] == "red" and consec_red >= entry_bricks and short_ok:
                         position = {"side": "SHORT", "entry": close, "entry_time": b["time"]}
                     elif b["color"] == "green" and consec_green >= entry_bricks and long_ok:
                         position = {"side": "LONG", "entry": close, "entry_time": b["time"]}
+
+                if pa_on:
+                    hist.append(close)
+                    if len(hist) > lb + 5:
+                        hist = hist[-(lb + 5):]
 
         n = len(trades)
         net = round(sum(t["pnl"] for t in trades), 2)
         summary = {
             "brick_size": bs, "entry_bricks": entry_bricks, "exit_bricks": exit_bricks,
             "cost_per_trade": cost_per_trade, "trend_ema": trend_ema, "macro_mult": macro_mult,
+            "lookback": lb, "range_breakout": bool(range_breakout),
+            "chop_filter": bool(chop_filter), "chop_thr": chop_thr, "structure": bool(structure),
             "trades": n, "wins": wins, "losses": n - wins,
             "win_rate": round(100 * wins / n, 1) if n else 0.0,
             "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
@@ -408,7 +446,12 @@ class TradingEngine:
                                       int(v.get("exit_bricks", exit_bricks)),
                                       float(v.get("cost_per_trade", cost_per_trade)),
                                       int(v.get("trend_ema", trend_ema)),
-                                      int(v.get("macro_mult", 0)))
+                                      int(v.get("macro_mult", 0)),
+                                      int(v.get("lookback", 0)),
+                                      bool(v.get("range_breakout", False)),
+                                      bool(v.get("chop_filter", False)),
+                                      float(v.get("chop_thr", 0.3)),
+                                      bool(v.get("structure", False)))
                 s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
                                                  f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
                 matrix.append(s)
