@@ -215,3 +215,28 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     macro-multiplier input, and a live macro-trend indicator (UP/DOWN/forming).
   * TESTS: 7 new macro tests; `test_symmetric_strategy.py` now 30 passing.
   * DEFAULT: filter OFF (manual toggle per user). Needs PRODUCTION REDEPLOY to go live.
+
+- 2026-07-15 — ER "CHOP FILTER" ENTRY STRATEGY (whipsaw fix, macro dropped by user):
+  * User dropped the macro filter; asked to filter false entries using price-action (range/high-low)
+    and reported two pain points: (1) market reverses right after 2 bricks, (2) market range shrinking.
+  * Ran 4 backtest matrices (2-yr NIFTY index, ₹200/trade, 50-pt bricks) covering: range-breakout,
+    chop/efficiency filter, structure/direction filter, entry_bricks sweep (1/2/3/4), chop-threshold
+    sweep, lookback sweep, and an adaptive ER-exit. Findings:
+    - Chop filter (Kaufman Efficiency Ratio = |net move|/total path over N brick closes) is the best
+      false-entry killer. Range-breakout HURT (win% dropped to 37.7%). Direction filter HURT.
+    - Best config: 2 bricks + ER>=0.30, lookback 50 → 48.6% win, PF 3.46, DD -17K (vs baseline
+      41.7%/2.51/-48K). 1-brick+ER = more trades/profit but higher DD. 3-brick = fewer trades, no gain.
+    - ER threshold 0.30 is the sweet spot (0.40/0.50 collapse trades). Adaptive ER-EXIT does NOT beat
+      the existing 1st-opposite-brick exit → EXIT LEFT UNCHANGED.
+  * ENGINE: added _chop_ok() (ER over last chop_lookback brick closes from self.bricks). _process_brick
+    entry now gated by entry_bricks (configurable, default 2) AND _chop_ok(). _replay_position /
+    _maybe_enter_on_start honor entry_bricks + chop filter. New settings: chop_filter(True),
+    chop_lookback(50), chop_threshold(0.30), entry_bricks(2). /api/state exposes chop_filter, chop_er,
+    chop_threshold, entry_bricks. Backtest _simulate gained lookback/range_breakout/chop_filter/
+    chop_thr/structure/exit_chop/exit_thr params (backtest-only).
+  * ROUTES: SettingsUpdate + entry_bricks(1-10), chop_filter, chop_lookback(2-500), chop_threshold(0-1).
+  * UI: StrategySettingsPanel — entry-bricks input, chop-filter toggle, ER threshold + lookback inputs,
+    live ER indicator (trading / chop-blocked / warming up).
+  * TESTS: 6 new tests (ER math, range block/allow, warming-up, entry_bricks=3). Suite now 36 passing.
+    Testing agent iteration_18: 100% backend (6/6) + frontend, no bugs.
+  * DEFAULT: chop_filter ON (this IS the chosen strategy). Needs PRODUCTION REDEPLOY to go live.
