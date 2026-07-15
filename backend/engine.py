@@ -205,62 +205,98 @@ class TradingEngine:
     # -------- strategy backtest (simulation-only: real historical candles, NO orders) --------
     NIFTY_INDEX_TOKEN = "99926000"   # NIFTY 50 index (NSE) — continuous multi-year 1-min history
 
-    def _simulate(self, candles, bs, lot, max_red_single_green, greens_ext):
-        """Replay candle closes through the EXACT live Renko + entry/exit rules for one brick size."""
-        anchor = {"v": None}; direction = {"v": 0}; seq = {"v": 0}
+    def _simulate(self, candles, bs, lot, entry_bricks=2, exit_bricks=1,
+                  cost_per_trade=0.0, trend_ema=0, macro_mult=0):
+        """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
+        enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
+        bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
+        `trend_ema`>0 adds an EMA trend filter on brick closes. `macro_mult`>0 adds a MULTI-
+        TIMEFRAME trend filter: a larger Renko at bs*macro_mult defines the dominant trend, and
+        only aligned entries are taken (longs while the macro trend is up, shorts while down) —
+        this suppresses counter-trend whipsaws."""
+        anchor = {"v": None}; direction = {"v": 0}
 
-        def bricks_from_close(price, ts):
-            out = []
-            if anchor["v"] is None:
-                anchor["v"] = round(price / bs) * bs; direction["v"] = 0; return out
-            n = int((price - anchor["v"]) / bs)
-            if n == 0:
-                return out
-            s = 1 if n > 0 else -1
-            if direction["v"] == 0 or s == direction["v"]:
-                count = abs(n)
-            else:
-                if abs(n) < 2:
+        def make_bricks(state, size):
+            def _b(price, ts):
+                out = []
+                if state["v"] is None:
+                    state["v"] = round(price / size) * size; state["d"] = 0; return out
+                n = int((price - state["v"]) / size)
+                if n == 0:
                     return out
-                count = abs(n) - 1; anchor["v"] += s * bs
-            for _ in range(count):
-                c2 = anchor["v"] + s * bs; anchor["v"] = c2; direction["v"] = s; seq["v"] += 1
-                out.append({"color": "green" if s > 0 else "red", "close": round(c2, 2), "time": ts})
-            return out
+                s = 1 if n > 0 else -1
+                if state["d"] == 0 or s == state["d"]:
+                    count = abs(n)
+                else:
+                    if abs(n) < 2:
+                        return out
+                    count = abs(n) - 1; state["v"] += s * size
+                for _ in range(count):
+                    c2 = state["v"] + s * size; state["v"] = c2; state["d"] = s
+                    out.append({"color": "green" if s > 0 else "red", "close": round(c2, 2), "time": ts})
+                return out
+            return _b
 
-        consec_red = consec_green = down_run_reds = 0
+        micro_state = {"v": None, "d": 0}
+        micro = make_bricks(micro_state, bs)
+        macro_state = {"v": None, "d": 0}
+        macro = make_bricks(macro_state, bs * macro_mult) if macro_mult else None
+        macro_dir = 0
+
+        consec_red = consec_green = 0
         position = None; trades = []
         equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
+        ema = None; alpha = (2.0 / (trend_ema + 1)) if trend_ema else 0.0
+
         for c in candles:
-            for b in bricks_from_close(float(c[4]), c[0]):
+            price = float(c[4])
+            if macro:                       # advance the macro trend from the same close
+                for mb in macro(price, c[0]):
+                    macro_dir = 1 if mb["color"] == "green" else -1
+            for b in micro(price, c[0]):
+                close = b["close"]
+                if trend_ema:
+                    ema = close if ema is None else ema + alpha * (close - ema)
                 if b["color"] == "red":
                     consec_red += 1; consec_green = 0
-                    if position:
-                        down_run_reds += 1
-                    elif consec_red >= 2:
-                        down_run_reds = consec_red
-                        position = {"entry": b["close"], "entry_time": b["time"]}
                 else:
                     consec_green += 1; consec_red = 0
-                    if position:
-                        need = greens_ext if down_run_reds >= max_red_single_green else 1
-                        if consec_green >= need:
-                            pts = position["entry"] - b["close"]   # SHORT: profit when price falls
-                            pnl = pts * lot
-                            trades.append({"entry_time": position["entry_time"], "exit_time": b["time"],
-                                           "entry": position["entry"], "exit": b["close"],
-                                           "points": round(pts, 2), "pnl": round(pnl, 2),
-                                           "reds": down_run_reds, "equity": round(equity + pnl, 2)})
-                            equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
-                            if pnl >= 0:
-                                wins += 1; gross_win += pnl
-                            else:
-                                gross_loss += pnl
-                            position = None; down_run_reds = 0
+
+                exited = False
+                # EXIT on `exit_bricks` opposite brick(s)
+                if position:
+                    if position["side"] == "SHORT" and b["color"] == "green" and consec_green >= exit_bricks:
+                        pts = position["entry"] - close; exited = True
+                    elif position["side"] == "LONG" and b["color"] == "red" and consec_red >= exit_bricks:
+                        pts = close - position["entry"]; exited = True
+                    if exited:
+                        pnl = pts * lot - cost_per_trade
+                        equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
+                        trades.append({"side": position["side"], "entry_time": position["entry_time"],
+                                       "exit_time": b["time"], "entry": position["entry"], "exit": close,
+                                       "points": round(pts, 2), "pnl": round(pnl, 2),
+                                       "equity": round(equity, 2)})
+                        if pnl >= 0:
+                            wins += 1; gross_win += pnl
+                        else:
+                            gross_loss += pnl
+                        position = None
+
+                # ENTRY when flat (skip the brick we exited on). Gated by EMA + macro trend.
+                if position is None and not exited:
+                    long_ok = (not trend_ema or close > ema) and (not macro_mult or macro_dir > 0)
+                    short_ok = (not trend_ema or close < ema) and (not macro_mult or macro_dir < 0)
+                    if b["color"] == "red" and consec_red >= entry_bricks and short_ok:
+                        position = {"side": "SHORT", "entry": close, "entry_time": b["time"]}
+                    elif b["color"] == "green" and consec_green >= entry_bricks and long_ok:
+                        position = {"side": "LONG", "entry": close, "entry_time": b["time"]}
+
         n = len(trades)
         net = round(sum(t["pnl"] for t in trades), 2)
         summary = {
-            "brick_size": bs, "trades": n, "wins": wins, "losses": n - wins,
+            "brick_size": bs, "entry_bricks": entry_bricks, "exit_bricks": exit_bricks,
+            "cost_per_trade": cost_per_trade, "trend_ema": trend_ema, "macro_mult": macro_mult,
+            "trades": n, "wins": wins, "losses": n - wins,
             "win_rate": round(100 * wins / n, 1) if n else 0.0,
             "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
             "avg_pnl": round(net / n, 2) if n else 0.0,
@@ -272,16 +308,19 @@ class TradingEngine:
         return summary, trades
 
     async def backtest(self, from_date=None, to_date=None, brick_size=None,
-                       brick_sizes=None, days=30, source="future"):
+                       brick_sizes=None, days=30, source="future",
+                       entry_bricks=2, exit_bricks=1, cost_per_trade=0.0, trend_ema=0,
+                       variants=None):
         """Simulation-only backtest — never places an order or mutates live state. Fills use
-        brick-close prices (excludes slippage/brokerage). source='index' uses the NIFTY 50 index
-        (continuous multi-year 1-min history) as a proxy; 'future' uses the selected contract
-        (limited to that contract's lifespan). Pass brick_sizes=[30,40,50] to sweep and compare."""
+        brick-close prices; `cost_per_trade` (round-trip brokerage+taxes+slippage) is subtracted
+        per trade for NET P&L. source='index' uses the NIFTY 50 index (continuous multi-year
+        1-min history) as a proxy; 'future' uses the selected contract (limited to its lifespan).
+        Pass brick_sizes=[50,75,100] to sweep and compare."""
         if not self.broker.connected:
             return {"ok": False, "error": "Connect Angel One first."}
         lot = self.settings["lot_size"]
-        max_red = self.settings["max_red_single_green"]
-        greens_ext = self.settings["greens_to_exit_extended"]
+        entry_bricks = max(1, int(entry_bricks)); exit_bricks = max(1, int(exit_bricks))
+        cost_per_trade = float(cost_per_trade or 0.0); trend_ema = max(0, int(trend_ema or 0))
         bricks = [int(b) for b in (brick_sizes or [brick_size or self.settings["brick_size"]]) if int(b) > 0]
         if not bricks:
             return {"ok": False, "error": "No valid brick size"}
@@ -325,16 +364,37 @@ class TradingEngine:
             return {"ok": False, "error": self.broker.error or "No historical candles returned"}
         all_candles.sort(key=lambda c: c[0])
 
+        # Variant matrix: fetch once, simulate many strategy configs for comparison.
+        if variants:
+            matrix = []
+            for v in variants:
+                s, _ = self._simulate(all_candles, int(v.get("brick_size") or self.settings["brick_size"]),
+                                      lot, int(v.get("entry_bricks", entry_bricks)),
+                                      int(v.get("exit_bricks", exit_bricks)),
+                                      float(v.get("cost_per_trade", cost_per_trade)),
+                                      int(v.get("trend_ema", trend_ema)),
+                                      int(v.get("macro_mult", 0)))
+                s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
+                                                 f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
+                matrix.append(s)
+            matrix.sort(key=lambda r: r["net_pnl"], reverse=True)
+            return {"ok": True, "matrix": matrix,
+                    "params": {"lot_size": lot, "source": source, "symbol": symbol,
+                               "from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d"),
+                               "candles": len(all_candles)}}
+
         results = []
         best_trades = None
         for bs in bricks:
-            summary, trades = self._simulate(all_candles, bs, lot, max_red, greens_ext)
+            summary, trades = self._simulate(all_candles, bs, lot, entry_bricks, exit_bricks,
+                                             cost_per_trade, trend_ema)
             results.append(summary)
             if best_trades is None or summary["net_pnl"] > best_trades[0]["net_pnl"]:
                 best_trades = (summary, trades)
         best_bs = max(results, key=lambda r: r["net_pnl"])["brick_size"] if results else None
-        params = {"lot_size": lot, "max_red_single_green": max_red,
-                  "greens_to_exit_extended": greens_ext, "source": source, "symbol": symbol,
+        params = {"lot_size": lot, "entry_bricks": entry_bricks, "exit_bricks": exit_bricks,
+                  "cost_per_trade": cost_per_trade, "trend_ema": trend_ema,
+                  "source": source, "symbol": symbol,
                   "from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d"),
                   "candles": len(all_candles)}
         if len(bricks) == 1:
@@ -1361,7 +1421,12 @@ class TradingEngine:
                                        brick_size=payload.get("brick_size"),
                                        brick_sizes=payload.get("brick_sizes"),
                                        days=int(payload.get("days", 30)),
-                                       source=payload.get("source", "future"))
+                                       source=payload.get("source", "future"),
+                                       entry_bricks=int(payload.get("entry_bricks", 2)),
+                                       exit_bricks=int(payload.get("exit_bricks", 1)),
+                                       cost_per_trade=float(payload.get("cost_per_trade", 0) or 0),
+                                       trend_ema=int(payload.get("trend_ema", 0) or 0),
+                                       variants=payload.get("variants"))
         if ctype == "instruments":
             if not self.broker.connected:
                 return {"ok": False, "error": "Connect Angel One first.", "items": []}

@@ -225,6 +225,11 @@ async def run_backtest(body: dict = None):
             "from_date": body.get("from_date"), "to_date": body.get("to_date"),
             "brick_size": body.get("brick_size"), "brick_sizes": body.get("brick_sizes"),
             "source": body.get("source", "future"), "days": int(body.get("days", 30)),
+            "entry_bricks": int(body.get("entry_bricks", 2)),
+            "exit_bricks": int(body.get("exit_bricks", 1)),
+            "cost_per_trade": float(body.get("cost_per_trade", 0) or 0),
+            "trend_ema": int(body.get("trend_ema", 0) or 0),
+            "variants": body.get("variants"),
         },
     })
     return {"ok": True, "job_id": job_id}
