@@ -243,7 +243,7 @@ class TradingEngine:
     def _simulate(self, candles, bs, lot, entry_bricks=2, exit_bricks=1,
                   cost_per_trade=0.0, trend_ema=0, macro_mult=0,
                   lookback=0, range_breakout=False, chop_filter=False,
-                  chop_thr=0.3, structure=False):
+                  chop_thr=0.3, structure=False, exit_chop=False, exit_thr=0.30):
         """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
         enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
         bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
@@ -294,7 +294,20 @@ class TradingEngine:
         ema = None; alpha = (2.0 / (trend_ema + 1)) if trend_ema else 0.0
         lb = max(0, int(lookback or 0))
         pa_on = lb > 0 and (range_breakout or chop_filter or structure)
+        track_hist = lb > 0 and (pa_on or exit_chop)
         hist = []                       # rolling brick closes (prior to the current brick)
+
+        def _er_dir(price_now):
+            """Efficiency ratio + net direction over the last `lb` closes (incl. price_now).
+            Returns (er, netdir). er in 0..1; netdir +1 up / -1 down / 0 flat."""
+            win = hist[-lb:]
+            if len(win) < lb:
+                return None, 0
+            seq = win + [price_now]
+            path = sum(abs(seq[i] - seq[i - 1]) for i in range(1, len(seq)))
+            er = abs(seq[-1] - seq[0]) / path if path else 0.0
+            nd = 1 if seq[-1] > seq[0] else (-1 if seq[-1] < seq[0] else 0)
+            return er, nd
 
         for c in candles:
             price = float(c[4])
@@ -311,24 +324,33 @@ class TradingEngine:
                     consec_green += 1; consec_red = 0
 
                 exited = False
-                # EXIT on `exit_bricks` opposite brick(s)
+                # EXIT on `exit_bricks` opposite brick(s). With `exit_chop`, a SINGLE opposite
+                # brick is treated as noise (held) while the ER trend is still strong & aligned
+                # with the position — ride the winner. A 2nd opposite brick always forces the exit.
                 if position:
-                    if position["side"] == "SHORT" and b["color"] == "green" and consec_green >= exit_bricks:
-                        pts = position["entry"] - close; exited = True
-                    elif position["side"] == "LONG" and b["color"] == "red" and consec_red >= exit_bricks:
-                        pts = close - position["entry"]; exited = True
-                    if exited:
-                        pnl = pts * lot - cost_per_trade
-                        equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
-                        trades.append({"side": position["side"], "entry_time": position["entry_time"],
-                                       "exit_time": b["time"], "entry": position["entry"], "exit": close,
-                                       "points": round(pts, 2), "pnl": round(pnl, 2),
-                                       "equity": round(equity, 2)})
-                        if pnl >= 0:
-                            wins += 1; gross_win += pnl
-                        else:
-                            gross_loss += pnl
-                        position = None
+                    is_short = position["side"] == "SHORT"
+                    opp = (is_short and b["color"] == "green") or (not is_short and b["color"] == "red")
+                    consec_opp = consec_green if is_short else consec_red
+                    if opp and consec_opp >= exit_bricks:
+                        do_exit = True
+                        if exit_chop and consec_opp < 2:
+                            er, nd = _er_dir(close)
+                            aligned = (not is_short and nd > 0) or (is_short and nd < 0)
+                            if er is not None and er >= exit_thr and aligned:
+                                do_exit = False       # strong aligned trend → ignore this brick
+                        if do_exit:
+                            pts = (position["entry"] - close) if is_short else (close - position["entry"])
+                            pnl = pts * lot - cost_per_trade
+                            equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
+                            trades.append({"side": position["side"], "entry_time": position["entry_time"],
+                                           "exit_time": b["time"], "entry": position["entry"], "exit": close,
+                                           "points": round(pts, 2), "pnl": round(pnl, 2),
+                                           "equity": round(equity, 2)})
+                            if pnl >= 0:
+                                wins += 1; gross_win += pnl
+                            else:
+                                gross_loss += pnl
+                            position = None; exited = True
 
                 # ENTRY when flat (skip the brick we exited on). Gated by EMA + macro trend +
                 # optional price-action filters (range breakout / chop / structure) on `hist`.
@@ -347,17 +369,15 @@ class TradingEngine:
                                 long_ok = long_ok and close > win[0]
                                 short_ok = short_ok and close < win[0]
                             if chop_filter:
-                                seq = win + [close]
-                                path = sum(abs(seq[i] - seq[i - 1]) for i in range(1, len(seq)))
-                                er = abs(seq[-1] - seq[0]) / path if path else 0.0
-                                if er < chop_thr:
+                                er, _ = _er_dir(close)
+                                if er is None or er < chop_thr:
                                     long_ok = short_ok = False
                     if b["color"] == "red" and consec_red >= entry_bricks and short_ok:
                         position = {"side": "SHORT", "entry": close, "entry_time": b["time"]}
                     elif b["color"] == "green" and consec_green >= entry_bricks and long_ok:
                         position = {"side": "LONG", "entry": close, "entry_time": b["time"]}
 
-                if pa_on:
+                if track_hist:
                     hist.append(close)
                     if len(hist) > lb + 5:
                         hist = hist[-(lb + 5):]
@@ -369,6 +389,7 @@ class TradingEngine:
             "cost_per_trade": cost_per_trade, "trend_ema": trend_ema, "macro_mult": macro_mult,
             "lookback": lb, "range_breakout": bool(range_breakout),
             "chop_filter": bool(chop_filter), "chop_thr": chop_thr, "structure": bool(structure),
+            "exit_chop": bool(exit_chop), "exit_thr": exit_thr,
             "trades": n, "wins": wins, "losses": n - wins,
             "win_rate": round(100 * wins / n, 1) if n else 0.0,
             "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
@@ -451,7 +472,9 @@ class TradingEngine:
                                       bool(v.get("range_breakout", False)),
                                       bool(v.get("chop_filter", False)),
                                       float(v.get("chop_thr", 0.3)),
-                                      bool(v.get("structure", False)))
+                                      bool(v.get("structure", False)),
+                                      bool(v.get("exit_chop", False)),
+                                      float(v.get("exit_thr", 0.30)))
                 s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
                                                  f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
                 matrix.append(s)
