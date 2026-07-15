@@ -29,6 +29,52 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
               </label>
 
               <div className="mt-3 border-t border-slate-100 pt-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <label className="font-mono text-[10px] uppercase text-slate-400">Entry — bricks to confirm</label>
+                  <input type="number" min="1" max="6" value={form.entry_bricks ?? 2} disabled={state.running}
+                    onChange={(e) => setForm({ ...form, entry_bricks: e.target.value })}
+                    className="w-16 border border-slate-300 px-2 py-1 font-mono text-xs text-right focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
+                    data-testid="setting-entry_bricks" />
+                </div>
+                <label className="flex items-center justify-between gap-2 cursor-pointer select-none" data-testid="chop-filter-toggle-label">
+                  <span className="font-mono text-[10px] uppercase text-slate-500">Chop filter (ER)<br /><span className="text-slate-400 normal-case">skip entries while the market is ranging (efficiency ratio)</span></span>
+                  <input type="checkbox" checked={!!form.chop_filter} disabled={state.running}
+                    onChange={(e) => setForm({ ...form, chop_filter: e.target.checked })}
+                    className="h-4 w-4 accent-emerald-600 disabled:opacity-40" data-testid="setting-chop_filter" />
+                </label>
+                {form.chop_filter && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div>
+                      <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">ER threshold</label>
+                      <input type="number" step="0.05" min="0" max="1" value={form.chop_threshold ?? 0.30} disabled={state.running}
+                        onChange={(e) => setForm({ ...form, chop_threshold: e.target.value })}
+                        className="w-full border border-slate-300 px-2 py-1 font-mono text-xs focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
+                        data-testid="setting-chop_threshold" />
+                    </div>
+                    <div>
+                      <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">Lookback (bricks)</label>
+                      <input type="number" min="2" max="200" value={form.chop_lookback ?? 50} disabled={state.running}
+                        onChange={(e) => setForm({ ...form, chop_lookback: e.target.value })}
+                        className="w-full border border-slate-300 px-2 py-1 font-mono text-xs focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
+                        data-testid="setting-chop_lookback" />
+                    </div>
+                  </div>
+                )}
+                {state.chop_filter && (
+                  <div className="flex items-center justify-between gap-2 mt-2" data-testid="chop-er-indicator">
+                    <span className="font-mono text-[10px] uppercase text-slate-400">Current efficiency (ER)</span>
+                    <span className={`font-mono text-[10px] uppercase font-bold px-2 py-0.5 ${
+                      state.chop_er == null ? "bg-slate-100 text-slate-500"
+                      : state.chop_er >= (state.chop_threshold ?? 0.3) ? "bg-emerald-100 text-emerald-700"
+                      : "bg-amber-100 text-amber-700"}`}>
+                      {state.chop_er == null ? "\u2014 warming up"
+                        : `${state.chop_er} ${state.chop_er >= (state.chop_threshold ?? 0.3) ? "\u2022 trading" : "\u2022 chop (blocked)"}`}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 border-t border-slate-100 pt-3">
                 <label className="flex items-center justify-between gap-2 cursor-pointer select-none" data-testid="macro-filter-toggle-label">
                   <span className="font-mono text-[10px] uppercase text-slate-500">Macro trend filter<br /><span className="text-slate-400 normal-case">only trade with the higher-timeframe Renko trend (cuts whipsaws)</span></span>
                   <input type="checkbox" checked={Number(form.macro_mult) > 0} disabled={state.running}

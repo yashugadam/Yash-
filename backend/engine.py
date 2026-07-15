@@ -22,6 +22,10 @@ class TradingEngine:
         self.settings = {
             "symbol": "NIFTY FUT",
             "brick_size": 50,
+            "entry_bricks": 2,             # consecutive same-colour bricks required to enter
+            "chop_filter": True,           # ER (efficiency-ratio) entry filter — block entries in chop
+            "chop_lookback": 50,           # bricks in the ER window
+            "chop_threshold": 0.30,        # min ER (net move / total path) to allow an entry
             "macro_mult": 0,               # >0 enables the multi-timeframe MACRO TREND FILTER:
                                            # a larger Renko at brick_size*macro_mult defines the
                                            # dominant trend; only aligned entries are taken (longs
@@ -519,6 +523,20 @@ class TradingEngine:
         return b
 
     # -------- strategy --------
+    def _chop_ok(self):
+        """Efficiency-ratio (ER) entry gate. ER = |net move| / total path over the last
+        `chop_lookback` brick closes. Low ER = choppy/ranging (block entries); high ER = trending.
+        Returns (allowed: bool, er: float|None). If the filter is off, always allowed."""
+        if not self.settings.get("chop_filter"):
+            return True, None
+        lb = max(2, int(self.settings.get("chop_lookback", 50) or 50))
+        closes = [b["close"] for b in self.bricks[-(lb + 1):]]
+        if len(closes) < lb + 1:
+            return False, None            # not enough history yet — sit out
+        path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+        er = abs(closes[-1] - closes[0]) / path if path else 0.0
+        return er >= float(self.settings.get("chop_threshold", 0.30) or 0.30), round(er, 3)
+
     def _process_brick(self, brick):
         color = brick["color"]
         if color == "red":
@@ -550,20 +568,22 @@ class TradingEngine:
                 asyncio.create_task(self._execute_order("SELL", "EXIT", self.price, brick["index"]))
                 return
 
-        # ---- ENTRY: 2+ same-direction bricks while flat (symmetric long & short). Flips
-        # immediately after an exit once the opposite 2-brick setup is met. If the bot (re)starts
-        # mid-trend with a run already > 2, it enters on the next same-colour brick. ----
+        # ---- ENTRY: `entry_bricks` same-direction bricks while flat (symmetric long & short),
+        # gated by the ER chop filter (skip choppy/ranging conditions) and the optional macro
+        # trend filter. Flips immediately after an exit once the opposite setup is met. ----
         if not (self.position or self.pending_entry) and not self._entries_blocked():
+            need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+            chop_ok, _er = self._chop_ok()
             macro_on = int(self.settings.get("macro_mult", 0) or 0) > 0
-            long_ok = (not macro_on) or self.macro_dir > 0
-            short_ok = (not macro_on) or self.macro_dir < 0
-            if color == "red" and self.consec_red >= 2 and short_ok:
+            long_ok = chop_ok and ((not macro_on) or self.macro_dir > 0)
+            short_ok = chop_ok and ((not macro_on) or self.macro_dir < 0)
+            if color == "red" and self.consec_red >= need and short_ok:
                 self.down_run_reds = self.consec_red
                 self.pending_entry = True
                 self._entry_side = "SHORT"
                 brick["signal"] = "SHORT"
                 asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
-            elif color == "green" and self.consec_green >= 2 and long_ok:
+            elif color == "green" and self.consec_green >= need and long_ok:
                 self.down_run_reds = self.consec_green
                 self.pending_entry = True
                 self._entry_side = "LONG"
@@ -949,9 +969,10 @@ class TradingEngine:
                 elif side == "LONG" and b["color"] == "red":
                     side = None; run = 0; exited = True
             if side is None and not exited:
-                if b["color"] == "red" and cr >= 2:
+                need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+                if b["color"] == "red" and cr >= need:
                     side = "SHORT"; run = cr
-                elif b["color"] == "green" and cg >= 2:
+                elif b["color"] == "green" and cg >= need:
                     side = "LONG"; run = cg
         return side, run, cr, cg
 
@@ -964,6 +985,10 @@ class TradingEngine:
             return
         side, run, cr, cg = self._replay_position()
         if not side:
+            return
+        # respect the ER chop filter on start too — don't enter mid-trend during chop
+        if not self._chop_ok()[0]:
+            self.consec_red = cr; self.consec_green = cg
             return
         self.down_run_reds = run
         self.consec_red = cr
@@ -1749,6 +1774,10 @@ class TradingEngine:
             "direction": self.direction,
             "macro_dir": self.macro_dir,
             "macro_mult": int(self.settings.get("macro_mult", 0) or 0),
+            "chop_filter": bool(self.settings.get("chop_filter")),
+            "chop_er": self._chop_ok()[1],
+            "chop_threshold": float(self.settings.get("chop_threshold", 0.30) or 0.30),
+            "entry_bricks": int(self.settings.get("entry_bricks", 2) or 2),
             "ticks_in_bar": self.ticks_in_bar,
             "orders": self.orders[:12],
             "expiry": {

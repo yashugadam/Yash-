@@ -30,6 +30,7 @@ def _fresh():
     eng.running = True
     eng.settings["max_red_single_green"] = 4
     eng.settings["greens_to_exit_extended"] = 2
+    eng.settings["chop_filter"] = False   # tests drive _process_brick without a real brick list
     return eng
 
 
@@ -522,3 +523,106 @@ def test_feed_macro_close_noop_when_off():
     for p in [24000, 24100, 24200, 24300]:
         eng._feed_macro_close(p)
     assert eng.macro_dir == 0
+
+
+# ---------------------------------------------------------------- CHOP FILTER (ER) + entry_bricks
+def _bricks_from_closes(closes):
+    """Build a brick list from a close series (color by direction vs previous)."""
+    out = []
+    for i, c in enumerate(closes):
+        color = "green" if (i == 0 or c >= closes[i - 1]) else "red"
+        out.append({"index": i + 1, "color": color, "open": 0.0, "close": float(c),
+                    "time": "t", "signal": None})
+    return out
+
+
+def test_chop_ok_blocks_when_ranging():
+    """A tight oscillating (ranging) close series → low ER → entries blocked."""
+    eng = _fresh()
+    eng.settings["chop_filter"] = True
+    eng.settings["chop_lookback"] = 10
+    eng.settings["chop_threshold"] = 0.30
+    # zig-zag around a level: net move ~0, big path -> ER ~0
+    closes = [100, 110, 100, 110, 100, 110, 100, 110, 100, 110, 100]
+    eng.bricks = _bricks_from_closes(closes)
+    ok, er = eng._chop_ok()
+    assert ok is False
+    assert er is not None and er < 0.30
+
+
+def test_chop_ok_allows_when_trending():
+    """A steadily rising close series → high ER → entries allowed."""
+    eng = _fresh()
+    eng.settings["chop_filter"] = True
+    eng.settings["chop_lookback"] = 10
+    eng.settings["chop_threshold"] = 0.30
+    closes = [100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]
+    eng.bricks = _bricks_from_closes(closes)
+    ok, er = eng._chop_ok()
+    assert ok is True
+    assert er == 1.0
+
+
+def test_chop_ok_blocks_until_enough_history():
+    """Not enough bricks for the lookback window → block (sit out)."""
+    eng = _fresh()
+    eng.settings["chop_filter"] = True
+    eng.settings["chop_lookback"] = 50
+    eng.bricks = _bricks_from_closes([100, 110, 120])
+    ok, er = eng._chop_ok()
+    assert ok is False and er is None
+
+
+def test_chop_filter_blocks_entry_in_range():
+    """With the chop filter ON and a ranging chart, 2 greens must NOT open a LONG."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["chop_filter"] = True
+        eng.settings["chop_lookback"] = 10
+        eng.settings["chop_threshold"] = 0.30
+        eng.bricks = _bricks_from_closes([100, 110, 100, 110, 100, 110, 100, 110, 100, 110, 100])
+        calls = []
+        async def rec(side, kind, price, idx, reason="SIGNAL"):
+            calls.append((side, kind))
+        with patch.object(eng, "_execute_order", side_effect=rec), \
+             patch.object(eng, "_entries_blocked", return_value=False):
+            eng.consec_green = 1
+            eng._process_brick(_mk("green", 99))   # 2nd green -> would enter, but ER blocks
+            await asyncio.sleep(0)
+        assert calls == []
+        assert eng.pending_entry is False
+    asyncio.run(scenario())
+
+
+def test_chop_filter_allows_entry_in_trend():
+    """With the chop filter ON and a trending chart, 2 greens SHOULD open a LONG."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["chop_filter"] = True
+        eng.settings["chop_lookback"] = 10
+        eng.settings["chop_threshold"] = 0.30
+        eng.bricks = _bricks_from_closes(list(range(100, 210, 10)))  # steady uptrend
+        calls = []
+        async def rec(side, kind, price, idx, reason="SIGNAL"):
+            calls.append((side, kind))
+        with patch.object(eng, "_execute_order", side_effect=rec), \
+             patch.object(eng, "_entries_blocked", return_value=False):
+            eng.consec_green = 1
+            eng._process_brick(_mk("green", 99))
+            await asyncio.sleep(0)
+        assert calls == [("BUY", "ENTRY")]
+        assert eng._entry_side == "LONG"
+    asyncio.run(scenario())
+
+
+def test_entry_bricks_setting_requires_three():
+    """entry_bricks=3 must NOT enter on 2 bricks, but SHOULD on the 3rd (chop filter off)."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["chop_filter"] = False
+        eng.settings["entry_bricks"] = 3
+        calls = await _feed(eng, ["red", "red"])
+        assert calls == []
+        calls = await _feed(eng, ["red", "red", "red"])
+        assert calls == [("SELL", "ENTRY")]
+    asyncio.run(scenario())
