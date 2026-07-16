@@ -446,7 +446,7 @@ class TradingEngine:
         if variants:
             matrix = []
             for v in variants:
-                s, _ = self._simulate(all_candles, int(v.get("brick_size") or self.settings["brick_size"]),
+                s, _tr = self._simulate(all_candles, int(v.get("brick_size") or self.settings["brick_size"]),
                                       lot, int(v.get("entry_bricks", entry_bricks)),
                                       int(v.get("exit_bricks", exit_bricks)),
                                       float(v.get("cost_per_trade", cost_per_trade)),
@@ -463,6 +463,8 @@ class TradingEngine:
                                       float(v.get("adapt_pct", 70)))
                 s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
                                                  f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
+                if v.get("include_trades"):
+                    s["trades_log"] = _tr
                 matrix.append(s)
             matrix.sort(key=lambda r: r["net_pnl"], reverse=True)
             return {"ok": True, "matrix": matrix,
