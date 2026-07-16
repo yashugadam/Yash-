@@ -186,7 +186,6 @@ export default function Dashboard({ onLogout }) {
       chop_filter: !!form.chop_filter,
       chop_lookback: Number(form.chop_lookback) || 50,
       chop_threshold: Number(form.chop_threshold),
-      macro_mult: Number(form.macro_mult) || 0,
       rollover_position: !!form.rollover_position,
     });
     toast.success("Strategy parameters updated");

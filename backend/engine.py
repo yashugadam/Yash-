@@ -26,10 +26,6 @@ class TradingEngine:
             "chop_filter": True,           # ER (efficiency-ratio) entry filter — block entries in chop
             "chop_lookback": 50,           # bricks in the ER window
             "chop_threshold": 0.30,        # min ER (net move / total path) to allow an entry
-            "macro_mult": 0,               # >0 enables the multi-timeframe MACRO TREND FILTER:
-                                           # a larger Renko at brick_size*macro_mult defines the
-                                           # dominant trend; only aligned entries are taken (longs
-                                           # while macro up, shorts while macro down). 0 = OFF.
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
@@ -67,9 +63,6 @@ class TradingEngine:
         self.ticks_in_bar = 0         # ticks accumulated in the current bar
         self.bricks: List[Dict[str, Any]] = []
         self.brick_seq = 0
-        # macro trend filter (multi-timeframe Renko built from the same closes)
-        self.macro_anchor = None
-        self.macro_dir = 0            # +1 macro-up, -1 macro-down, 0 undetermined
 
         # strategy state
         self.consec_red = 0
@@ -118,7 +111,6 @@ class TradingEngine:
     # a REVERSAL needs a 2x brick move (the first opposite brick prints only after 2 boxes).
     def _feed_close(self, price, ts=None):
         bs = self.settings["brick_size"]
-        self._feed_macro_close(price)
         formed = []
         if self.anchor is None:
             self.anchor = round(price / bs) * bs
@@ -142,31 +134,6 @@ class TradingEngine:
             self.direction = s
             formed.append(self._new_brick("green" if s > 0 else "red", o, c, ts))
         return formed
-
-    # advance the MACRO Renko trend from the same close (larger box = brick_size*macro_mult).
-    # Only tracks direction; no bricks are drawn. macro_dir gates entries in _process_brick.
-    def _feed_macro_close(self, price):
-        mm = int(self.settings.get("macro_mult", 0) or 0)
-        if mm <= 0:
-            self.macro_dir = 0
-            return
-        ms = self.settings["brick_size"] * mm
-        if self.macro_anchor is None:
-            self.macro_anchor = round(price / ms) * ms
-            return
-        n = int((price - self.macro_anchor) / ms)
-        if n == 0:
-            return
-        s = 1 if n > 0 else -1
-        if self.macro_dir == 0 or s == self.macro_dir:
-            count = abs(n)                    # continuation
-        else:
-            if abs(n) < 2:                    # reversal needs a 2x move
-                return
-            count = abs(n) - 1
-            self.macro_anchor += s * ms       # reversal gap
-        self.macro_anchor += s * ms * count
-        self.macro_dir = s
 
     # -------- historical backfill (real Angel One 1-min candles, paginated) --------
     async def load_history(self, days=5, from_date=None):
@@ -211,8 +178,6 @@ class TradingEngine:
         # rebuild the renko chart from real candle closes (no strategy/orders on history)
         self.anchor = None
         self.direction = 0
-        self.macro_anchor = None
-        self.macro_dir = 0
         self.bricks = []
         self.brick_seq = 0
         last_close = None
@@ -245,16 +210,13 @@ class TradingEngine:
     NIFTY_INDEX_TOKEN = "99926000"   # NIFTY 50 index (NSE) — continuous multi-year 1-min history
 
     def _simulate(self, candles, bs, lot, entry_bricks=2, exit_bricks=1,
-                  cost_per_trade=0.0, trend_ema=0, macro_mult=0,
+                  cost_per_trade=0.0, trend_ema=0,
                   lookback=0, range_breakout=False, chop_filter=False,
                   chop_thr=0.3, structure=False, exit_chop=False, exit_thr=0.30):
         """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
         enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
         bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
-        `trend_ema`>0 adds an EMA trend filter on brick closes. `macro_mult`>0 adds a MULTI-
-        TIMEFRAME trend filter: a larger Renko at bs*macro_mult defines the dominant trend, and
-        only aligned entries are taken (longs while the macro trend is up, shorts while down) —
-        this suppresses counter-trend whipsaws.
+        `trend_ema`>0 adds an EMA trend filter on brick closes.
 
         PRICE-ACTION FILTERS (all use a `lookback` window of the most recent brick closes):
         - `range_breakout`: LONG only if the entry close breaks ABOVE the prior swing high, SHORT
@@ -288,9 +250,6 @@ class TradingEngine:
 
         micro_state = {"v": None, "d": 0}
         micro = make_bricks(micro_state, bs)
-        macro_state = {"v": None, "d": 0}
-        macro = make_bricks(macro_state, bs * macro_mult) if macro_mult else None
-        macro_dir = 0
 
         consec_red = consec_green = 0
         position = None; trades = []
@@ -315,9 +274,6 @@ class TradingEngine:
 
         for c in candles:
             price = float(c[4])
-            if macro:                       # advance the macro trend from the same close
-                for mb in macro(price, c[0]):
-                    macro_dir = 1 if mb["color"] == "green" else -1
             for b in micro(price, c[0]):
                 close = b["close"]
                 if trend_ema:
@@ -356,11 +312,11 @@ class TradingEngine:
                                 gross_loss += pnl
                             position = None; exited = True
 
-                # ENTRY when flat (skip the brick we exited on). Gated by EMA + macro trend +
-                # optional price-action filters (range breakout / chop / structure) on `hist`.
+                # ENTRY when flat (skip the brick we exited on). Gated by EMA + optional
+                # price-action filters (range breakout / chop / structure) on `hist`.
                 if position is None and not exited:
-                    long_ok = (not trend_ema or close > ema) and (not macro_mult or macro_dir > 0)
-                    short_ok = (not trend_ema or close < ema) and (not macro_mult or macro_dir < 0)
+                    long_ok = (not trend_ema or close > ema)
+                    short_ok = (not trend_ema or close < ema)
                     if pa_on:
                         win = hist[-lb:]
                         if len(win) < lb:
@@ -390,7 +346,7 @@ class TradingEngine:
         net = round(sum(t["pnl"] for t in trades), 2)
         summary = {
             "brick_size": bs, "entry_bricks": entry_bricks, "exit_bricks": exit_bricks,
-            "cost_per_trade": cost_per_trade, "trend_ema": trend_ema, "macro_mult": macro_mult,
+            "cost_per_trade": cost_per_trade, "trend_ema": trend_ema,
             "lookback": lb, "range_breakout": bool(range_breakout),
             "chop_filter": bool(chop_filter), "chop_thr": chop_thr, "structure": bool(structure),
             "exit_chop": bool(exit_chop), "exit_thr": exit_thr,
@@ -471,7 +427,6 @@ class TradingEngine:
                                       int(v.get("exit_bricks", exit_bricks)),
                                       float(v.get("cost_per_trade", cost_per_trade)),
                                       int(v.get("trend_ema", trend_ema)),
-                                      int(v.get("macro_mult", 0)),
                                       int(v.get("lookback", 0)),
                                       bool(v.get("range_breakout", False)),
                                       bool(v.get("chop_filter", False)),
@@ -569,21 +524,18 @@ class TradingEngine:
                 return
 
         # ---- ENTRY: `entry_bricks` same-direction bricks while flat (symmetric long & short),
-        # gated by the ER chop filter (skip choppy/ranging conditions) and the optional macro
-        # trend filter. Flips immediately after an exit once the opposite setup is met. ----
+        # gated by the ER chop filter (skip choppy/ranging conditions). Flips immediately after an
+        # exit once the opposite setup is met. ----
         if not (self.position or self.pending_entry) and not self._entries_blocked():
             need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
             chop_ok, _er = self._chop_ok()
-            macro_on = int(self.settings.get("macro_mult", 0) or 0) > 0
-            long_ok = chop_ok and ((not macro_on) or self.macro_dir > 0)
-            short_ok = chop_ok and ((not macro_on) or self.macro_dir < 0)
-            if color == "red" and self.consec_red >= need and short_ok:
+            if color == "red" and self.consec_red >= need and chop_ok:
                 self.down_run_reds = self.consec_red
                 self.pending_entry = True
                 self._entry_side = "SHORT"
                 brick["signal"] = "SHORT"
                 asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
-            elif color == "green" and self.consec_green >= need and long_ok:
+            elif color == "green" and self.consec_green >= need and chop_ok:
                 self.down_run_reds = self.consec_green
                 self.pending_entry = True
                 self._entry_side = "LONG"
@@ -1306,7 +1258,6 @@ class TradingEngine:
             "running": self.running, "price": self.price, "mode": self.mode,
             "settings": self.settings,
             "anchor": self.anchor, "direction": self.direction, "brick_seq": self.brick_seq,
-            "macro_anchor": self.macro_anchor, "macro_dir": self.macro_dir,
             "bricks": self.bricks[-800:],
             "consec_red": self.consec_red, "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds, "position": self.position,
@@ -1329,8 +1280,6 @@ class TradingEngine:
             self.settings.update(doc["settings"])
         self.anchor = doc.get("anchor")
         self.direction = doc.get("direction", 0)
-        self.macro_anchor = doc.get("macro_anchor")
-        self.macro_dir = doc.get("macro_dir", 0)
         self.brick_seq = doc.get("brick_seq", 0)
         self.bricks = doc.get("bricks") or []
         self.consec_red = doc.get("consec_red", 0)
@@ -1507,8 +1456,6 @@ class TradingEngine:
             self.settings["instrument_token"] = token
             self.anchor = None
             self.direction = 0
-            self.macro_anchor = None
-            self.macro_dir = 0
             self.bricks = []
             self.brick_seq = 0
             self.consec_red = self.consec_green = self.down_run_reds = 0
@@ -1530,19 +1477,7 @@ class TradingEngine:
             await self._persist_state()
             return {"running": False, "squared_off": squared}
         if ctype == "settings":
-            data = payload.get("data") or {}
-            prev_macro = int(self.settings.get("macro_mult", 0) or 0)
-            prev_bs = self.settings.get("brick_size")
-            self.settings.update(data)
-            new_macro = int(self.settings.get("macro_mult", 0) or 0)
-            # If the macro filter was toggled/retuned (or brick size changed), rebuild the macro
-            # trend from existing brick closes so it's immediately valid (no cold-start blackout).
-            if new_macro != prev_macro or self.settings.get("brick_size") != prev_bs:
-                self.macro_anchor = None
-                self.macro_dir = 0
-                if new_macro > 0:
-                    for b in self.bricks:
-                        self._feed_macro_close(b["close"])
+            self.settings.update(payload.get("data") or {})
             await self._persist_state()
             return {"ok": True, "settings": self.settings, **self.settings}
         if ctype == "adopt":
@@ -1720,8 +1655,6 @@ class TradingEngine:
         self.momentum = 0.0
         self.anchor = None
         self.direction = 0
-        self.macro_anchor = None
-        self.macro_dir = 0
         self.ticks_in_bar = 0
         self.bricks = []
         self.brick_seq = 0
@@ -1772,8 +1705,6 @@ class TradingEngine:
             "consec_green": self.consec_green,
             "down_run_reds": self.down_run_reds,
             "direction": self.direction,
-            "macro_dir": self.macro_dir,
-            "macro_mult": int(self.settings.get("macro_mult", 0) or 0),
             "chop_filter": bool(self.settings.get("chop_filter")),
             "chop_er": self._chop_ok()[1],
             "chop_threshold": float(self.settings.get("chop_threshold", 0.30) or 0.30),

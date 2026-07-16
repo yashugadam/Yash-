@@ -43,7 +43,6 @@ class SettingsUpdate(BaseModel):
     chop_filter: Optional[bool] = None
     chop_lookback: Optional[int] = Field(None, ge=2, le=500)
     chop_threshold: Optional[float] = Field(None, ge=0, le=1)
-    macro_mult: Optional[int] = Field(None, ge=0, le=10)
     bar_seconds: Optional[int] = Field(None, ge=1, le=3600)
     lot_size: Optional[int] = Field(None, ge=1, le=MAX_ORDER_QTY)
     buffer_points: Optional[float] = Field(None, ge=0, le=2000)

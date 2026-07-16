@@ -240,3 +240,11 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * TESTS: 6 new tests (ER math, range block/allow, warming-up, entry_bricks=3). Suite now 36 passing.
     Testing agent iteration_18: 100% backend (6/6) + frontend, no bugs.
   * DEFAULT: chop_filter ON (this IS the chosen strategy). Needs PRODUCTION REDEPLOY to go live.
+
+- 2026-07-15 — REMOVED MACRO TREND FILTER (user request): fully deleted from engine.py
+  (settings macro_mult, _feed_macro_close, macro_anchor/macro_dir, entry gate, state persist/load,
+  resets, settings-command rebuild, /api/state exposure, and backtest _simulate macro params),
+  routes.py (SettingsUpdate.macro_mult), Dashboard.js (saveSettings), StrategySettingsPanel.jsx
+  (macro toggle/indicator UI), tests (7 macro tests removed → 29 passing), and cleaned the stale
+  macro_mult key from the persisted engine_state doc in Mongo. Active strategy is unchanged:
+  2-brick entry + ER chop filter (lookback 50, threshold 0.30), exit on 1st opposite brick.
