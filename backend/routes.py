@@ -216,6 +216,16 @@ async def angel_load_history(body: dict = None):
     return await _relay("load_history", {"days": days, "from_date": body.get("from_date")}, timeout=45.0)
 
 
+@api_router.post("/analyze/skips")
+async def analyze_skips(body: dict = None):
+    """Diagnostic: replay recent real candles through the live strategy and report which entry
+    signals the ER chop filter TOOK vs SKIPPED (with counterfactual outcomes). No orders placed."""
+    body = body or {}
+    days = max(1, min(int(body.get("days", 10)), 60))
+    return await _relay("analyze_skips", {"days": days, "source": body.get("source", "future")},
+                        timeout=50.0)
+
+
 @api_router.post("/backtest")
 async def run_backtest(body: dict = None):
     """Submit a backtest job (runs in the background on the leader). Returns a job_id to poll —

@@ -467,6 +467,132 @@ class TradingEngine:
         return {"ok": True, "sweep": results, "best_brick_size": best_bs,
                 "best_summary": summary, "best_trades": trades[-1000:], "params": params}
 
+    async def analyze_skips(self, days=10, source="future"):
+        """Replay recent REAL candles through the CURRENT live strategy (entry_bricks + ER chop
+        filter, exit on 1st opposite brick) and report which entry signals were TAKEN vs SKIPPED
+        by the ER filter. For each skipped signal, computes the counterfactual outcome (points if
+        we HAD entered and exited on the next opposite brick) so you can see whether skipping was
+        the right call. Diagnostic only — never places an order."""
+        if not self.broker.connected:
+            return {"ok": False, "error": "Connect Angel One first."}
+        bs = self.settings["brick_size"]
+        need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+        lb = max(2, int(self.settings.get("chop_lookback", 50) or 50))
+        thr = float(self.settings.get("chop_threshold", 0.30) or 0.30)
+        lot = self.settings["lot_size"]
+        use_index = (source == "index")
+        exch = "NSE" if use_index else None
+        token = self.NIFTY_INDEX_TOKEN if use_index else None
+        symbol = "NIFTY 50 (index)" if use_index else self.broker.fut_symbol
+        now = datetime.now(IST)
+        start = now - timedelta(days=int(days))
+        all_candles, seen, cur, calls = [], set(), start, 0
+        while cur < now and calls < 10:
+            chunk_end = min(cur + timedelta(days=25), now)
+            candles = await asyncio.to_thread(self.broker.get_history, "ONE_MINUTE",
+                          cur.strftime("%Y-%m-%d %H:%M"), chunk_end.strftime("%Y-%m-%d %H:%M"),
+                          exch, token)
+            calls += 1
+            if candles:
+                for c in candles:
+                    if c[0] not in seen:
+                        seen.add(c[0]); all_candles.append(c)
+            cur = chunk_end + timedelta(minutes=1)
+            await asyncio.sleep(0.3)
+        if not all_candles:
+            return {"ok": False, "error": self.broker.error or "No historical candles returned"}
+        all_candles.sort(key=lambda c: c[0])
+
+        # build the Renko bricks (same close-based traditional Renko as the live engine)
+        state = {"v": None, "d": 0}
+        bricks = []
+        for c in all_candles:
+            price = float(c[4]); ts = c[0]
+            if state["v"] is None:
+                state["v"] = round(price / bs) * bs; state["d"] = 0; continue
+            n = int((price - state["v"]) / bs)
+            if n == 0:
+                continue
+            s = 1 if n > 0 else -1
+            if state["d"] == 0 or s == state["d"]:
+                count = abs(n)
+            else:
+                if abs(n) < 2:
+                    continue
+                count = abs(n) - 1; state["v"] += s * bs
+            for _ in range(count):
+                c2 = state["v"] + s * bs; state["v"] = c2; state["d"] = s
+                bricks.append({"color": "green" if s > 0 else "red", "close": round(c2, 2), "time": ts})
+
+        closes = [b["close"] for b in bricks]
+
+        def er_at(i):
+            if i < lb:
+                return None
+            seq = closes[i - lb:i + 1]
+            path = sum(abs(seq[k] - seq[k - 1]) for k in range(1, len(seq)))
+            return abs(seq[-1] - seq[0]) / path if path else 0.0
+
+        def counterfactual(i, side):
+            entry = closes[i]
+            for j in range(i + 1, len(bricks)):
+                if (side == "SHORT" and bricks[j]["color"] == "green") or \
+                   (side == "LONG" and bricks[j]["color"] == "red"):
+                    ex = closes[j]
+                    return round((entry - ex) if side == "SHORT" else (ex - entry), 2)
+            return None   # still open at end of window
+
+        consec_red = consec_green = 0
+        position = None
+        taken, skipped = [], []
+        for i, b in enumerate(bricks):
+            color = b["color"]
+            if color == "red":
+                consec_red += 1; consec_green = 0
+            else:
+                consec_green += 1; consec_red = 0
+            if position:
+                if (position == "SHORT" and color == "green") or (position == "LONG" and color == "red"):
+                    position = None
+                continue
+            sig = "SHORT" if (color == "red" and consec_red >= need) else \
+                  ("LONG" if (color == "green" and consec_green >= need) else None)
+            if not sig:
+                continue
+            er = er_at(i)
+            if er is not None and er >= thr:
+                position = sig
+                taken.append({"time": b["time"], "side": sig, "price": b["close"],
+                              "er": round(er, 3)})
+            else:
+                pts = counterfactual(i, sig)
+                skipped.append({"time": b["time"], "side": sig, "price": b["close"],
+                                "er": (round(er, 3) if er is not None else None),
+                                "would_be_points": pts,
+                                "would_be_pnl": (round(pts * lot, 2) if pts is not None else None),
+                                "verdict": ("good skip (would have LOST)" if (pts is not None and pts < 0)
+                                            else "missed win" if (pts is not None and pts > 0)
+                                            else "neutral/warming-up")})
+        good = sum(1 for s in skipped if s["would_be_points"] is not None and s["would_be_points"] < 0)
+        missed = sum(1 for s in skipped if s["would_be_points"] is not None and s["would_be_points"] > 0)
+        saved_pts = -sum(s["would_be_points"] for s in skipped
+                         if s["would_be_points"] is not None and s["would_be_points"] < 0)
+        missed_pts = sum(s["would_be_points"] for s in skipped
+                         if s["would_be_points"] is not None and s["would_be_points"] > 0)
+        return {"ok": True,
+                "params": {"symbol": symbol, "source": source, "brick_size": bs, "entry_bricks": need,
+                           "chop_threshold": thr, "chop_lookback": lb, "lot_size": lot,
+                           "from": start.strftime("%Y-%m-%d"), "to": now.strftime("%Y-%m-%d"),
+                           "candles": len(all_candles), "bricks": len(bricks)},
+                "summary": {"signals": len(taken) + len(skipped), "taken": len(taken),
+                            "skipped": len(skipped), "good_skips": good, "missed_wins": missed,
+                            "loss_points_avoided": round(saved_pts, 2),
+                            "win_points_missed": round(missed_pts, 2),
+                            "net_points_from_filter": round(saved_pts - missed_pts, 2),
+                            "net_rupees_from_filter": round((saved_pts - missed_pts) * lot, 2)},
+                "taken": taken[-100:], "skipped": skipped[-100:]}
+
+
 
     def _new_brick(self, color, o, c, ts=None):
         self.brick_seq += 1
@@ -1496,6 +1622,9 @@ class TradingEngine:
         if ctype == "load_history":
             return await self.load_history(days=int(payload.get("days", 5)),
                                            from_date=payload.get("from_date"))
+        if ctype == "analyze_skips":
+            return await self.analyze_skips(days=int(payload.get("days", 10)),
+                                            source=payload.get("source", "future"))
         if ctype == "backtest":
             return await self.backtest(from_date=payload.get("from_date"),
                                        to_date=payload.get("to_date"),
