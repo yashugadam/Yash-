@@ -265,3 +265,17 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     chop_filter=true, chop_lookback=20, chop_threshold=0.20, entry_bricks=2.
   * NOTE: engine default is still lb50/0.30 — production must set lb20/0.20 in Settings after redeploy.
   * Loaded last 60 days (194 bricks) into the live chart via /api/angel/load-history.
+
+- 2026-07-15 — CODE REVIEW FIX + CHOP FILTER MANDATORY:
+  * Code review (READY WITH FIXES): confirmed ER filter/entry gating/exit sizing/side-aware retries/
+    idempotency/leader-election/macro-removal all correct. Fixed 1 MEDIUM: gap-flip re-entry
+    (engine.py ~829) bypassed the ER chop filter + entry_bricks — now requires _chop_ok() and uses
+    configurable entry_bricks. Added tests test_gap_flip_blocked_by_chop_filter + _honors_entry_bricks.
+  * User requested the chop filter be NON-DISABLEABLE (safety). Made it mandatory:
+    - _chop_ok() clamps threshold to min 0.05 (threshold 0 can no longer disable it).
+    - _load_state() and settings command force self.settings["chop_filter"]=True.
+    - routes SettingsUpdate: removed chop_filter field; chop_threshold now ge=0.05 (rejects 0 w/ 422).
+    - Dashboard saveSettings: removed chop_filter. UI: removed toggle, shows "ALWAYS ON" badge;
+      ER threshold + lookback + live ER indicator always visible.
+  * Live config remains lb20 / t0.20 / entry_bricks 2 (preview). 31/31 unit tests pass.
+  * NOTE: engine default chop_threshold still 0.30, chop_lookback 50 — production must set 0.20/20.

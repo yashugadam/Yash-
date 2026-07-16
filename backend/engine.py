@@ -645,7 +645,8 @@ class TradingEngine:
             return False, None            # not enough history yet — sit out
         path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
         er = abs(closes[-1] - closes[0]) / path if path else 0.0
-        return er >= float(self.settings.get("chop_threshold", 0.30) or 0.30), round(er, 3)
+        thr = max(0.05, float(self.settings.get("chop_threshold", 0.30) or 0.30))
+        return er >= thr, round(er, 3)
 
     def _process_brick(self, brick):
         color = brick["color"]
@@ -1435,6 +1436,7 @@ class TradingEngine:
             return
         if doc.get("settings"):
             self.settings.update(doc["settings"])
+        self.settings["chop_filter"] = True   # chop filter is mandatory — never load it as off
         self.anchor = doc.get("anchor")
         self.direction = doc.get("direction", 0)
         self.brick_seq = doc.get("brick_seq", 0)
@@ -1635,6 +1637,7 @@ class TradingEngine:
             return {"running": False, "squared_off": squared}
         if ctype == "settings":
             self.settings.update(payload.get("data") or {})
+            self.settings["chop_filter"] = True   # mandatory — cannot be disabled
             await self._persist_state()
             return {"ok": True, "settings": self.settings, **self.settings}
         if ctype == "adopt":

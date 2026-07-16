@@ -36,17 +36,14 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
                     className="w-16 border border-slate-300 px-2 py-1 font-mono text-xs text-right focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
                     data-testid="setting-entry_bricks" />
                 </div>
-                <label className="flex items-center justify-between gap-2 cursor-pointer select-none" data-testid="chop-filter-toggle-label">
+                <div className="flex items-center justify-between gap-2" data-testid="chop-filter-label">
                   <span className="font-mono text-[10px] uppercase text-slate-500">Chop filter (ER)<br /><span className="text-slate-400 normal-case">skip entries while the market is ranging (efficiency ratio)</span></span>
-                  <input type="checkbox" checked={!!form.chop_filter} disabled={state.running}
-                    onChange={(e) => setForm({ ...form, chop_filter: e.target.checked })}
-                    className="h-4 w-4 accent-emerald-600 disabled:opacity-40" data-testid="setting-chop_filter" />
-                </label>
-                {form.chop_filter && (
-                  <div className="grid grid-cols-2 gap-2 mt-2">
+                  <span className="font-mono text-[9px] uppercase font-bold px-2 py-0.5 bg-emerald-100 text-emerald-700" data-testid="chop-filter-status">Always on</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mt-2">
                     <div>
                       <label className="font-mono text-[10px] uppercase text-slate-400 block mb-1">ER threshold</label>
-                      <input type="number" step="0.05" min="0" max="1" value={form.chop_threshold ?? 0.30} disabled={state.running}
+                      <input type="number" step="0.05" min="0.05" max="1" value={form.chop_threshold ?? 0.30} disabled={state.running}
                         onChange={(e) => setForm({ ...form, chop_threshold: e.target.value })}
                         className="w-full border border-slate-300 px-2 py-1 font-mono text-xs focus:outline-none focus:border-slate-900 disabled:bg-slate-50 disabled:text-slate-400"
                         data-testid="setting-chop_threshold" />
@@ -59,9 +56,7 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
                         data-testid="setting-chop_lookback" />
                     </div>
                   </div>
-                )}
-                {state.chop_filter && (
-                  <div className="flex items-center justify-between gap-2 mt-2" data-testid="chop-er-indicator">
+                <div className="flex items-center justify-between gap-2 mt-2" data-testid="chop-er-indicator">
                     <span className="font-mono text-[10px] uppercase text-slate-400">Current efficiency (ER)</span>
                     <span className={`font-mono text-[10px] uppercase font-bold px-2 py-0.5 ${
                       state.chop_er == null ? "bg-slate-100 text-slate-500"
@@ -71,7 +66,6 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
                         : `${state.chop_er} ${state.chop_er >= (state.chop_threshold ?? 0.3) ? "\u2022 trading" : "\u2022 chop (blocked)"}`}
                     </span>
                   </div>
-                )}
               </div>
 
               <button onClick={saveSettings} disabled={state.running} data-testid="save-settings-button"

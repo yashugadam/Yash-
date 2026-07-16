@@ -183,7 +183,6 @@ export default function Dashboard({ onLogout }) {
       greens_to_exit_extended: Number(form.greens_to_exit_extended),
       daily_max_loss: Number(form.daily_max_loss),
       entry_bricks: Number(form.entry_bricks) || 2,
-      chop_filter: !!form.chop_filter,
       chop_lookback: Number(form.chop_lookback) || 50,
       chop_threshold: Number(form.chop_threshold),
       rollover_position: !!form.rollover_position,
