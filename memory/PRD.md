@@ -248,3 +248,20 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   (macro toggle/indicator UI), tests (7 macro tests removed → 29 passing), and cleaned the stale
   macro_mult key from the persisted engine_state doc in Mongo. Active strategy is unchanged:
   2-brick entry + ER chop filter (lookback 50, threshold 0.30), exit on 1st opposite brick.
+
+- 2026-07-15 — SKIP DIAGNOSTIC + ADAPTIVE ER + REGIME TUNING:
+  * User asked "did the system skip trades?". Built POST /api/analyze/skips (engine.analyze_skips):
+    replays recent real candles through the live strategy and reports TAKEN vs ER-SKIPPED signals
+    with counterfactual outcomes. Diagnostic only, no orders.
+  * FINDING: with strict lb50/t0.30, the ER filter took 0 trades over the last 2 months — NIFTY
+    range-bound so ER never reached 0.30 over a 50-brick (~13 trading-day) window. lb50 is a
+    "trend-only" switch that goes dormant in quiet regimes.
+  * Added ADAPTIVE ER threshold to backtest _simulate (er_adaptive/adapt_window/adapt_pct): trades
+    when current ER >= p-th percentile of its own recent ER distribution (regime-relative). Also
+    added include_trades flag to the variant matrix to return full per-variant trade logs.
+  * Regime comparison (recent 60d future vs 2yr index) produced. USER CHOSE **Fixed lb20 / t0.20**
+    as the live config (recent 60d: 20 trades, 40% win, PF 1.92, +Rs38,250, DD -16,850; 2yr: 295
+    trades, PF 2.62, +Rs11.2L, DD -48,900). Applied live in PREVIEW via /api/settings:
+    chop_filter=true, chop_lookback=20, chop_threshold=0.20, entry_bricks=2.
+  * NOTE: engine default is still lb50/0.30 — production must set lb20/0.20 in Settings after redeploy.
+  * Loaded last 60 days (194 bricks) into the live chart via /api/angel/load-history.
