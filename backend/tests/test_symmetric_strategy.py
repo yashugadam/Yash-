@@ -283,6 +283,43 @@ def test_forced_exit_does_not_flip():
     asyncio.run(scenario())
 
 
+def test_gap_flip_blocked_by_chop_filter():
+    """Gap-flip must respect the ER chop filter: in a ranging (low-ER) market, a SIGNAL exit
+    with 2+ opposite bricks must NOT open an immediate reversal."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["chop_filter"] = True
+        eng.settings["chop_lookback"] = 10
+        eng.settings["chop_threshold"] = 0.30
+        eng.bricks = _bricks_from_closes([100, 110, 100, 110, 100, 110, 100, 110, 100, 110, 100])
+        _long_pos(eng)
+        eng.consec_red = 2          # gap printed 2 reds, but ER is ~0 (chop)
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "EXIT", 100.0, 5)
+        assert eng.position is None
+        assert eng.pending_entry is False
+    asyncio.run(scenario())
+
+
+def test_gap_flip_honors_entry_bricks():
+    """With entry_bricks=3, a gap-flip must NOT fire on only 2 opposite bricks."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["chop_filter"] = False
+        eng.settings["entry_bricks"] = 3
+        _long_pos(eng)
+        eng.consec_red = 2          # only 2 reds; need 3
+        with contextlib.ExitStack() as st:
+            for p in _wire_fills(eng):
+                st.enter_context(p)
+            await eng._execute_order("SELL", "EXIT", 100.0, 5)
+        assert eng.position is None
+    asyncio.run(scenario())
+
+
+
 # ---------------------------------------------------------------- exit sizing (reconciled/adopted)
 def test_exit_order_sizes_to_actual_position_qty():
     """A reconciled/adopted position larger than one lot (e.g. 130) must be exited in FULL,

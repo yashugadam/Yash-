@@ -827,12 +827,14 @@ class TradingEngine:
                 # don't wait for another brick. Skipped for forced exits (expiry/breaker/manual)
                 # and while entries are blocked.
                 if kind == "EXIT" and reason == "SIGNAL" and self.position is None \
-                        and not self.pending_entry and not self._entries_blocked():
-                    if self.consec_red >= 2:
+                        and not self.pending_entry and not self._entries_blocked() \
+                        and self._chop_ok()[0]:
+                    need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+                    if self.consec_red >= need:
                         self._entry_side, flip_side = "SHORT", "SELL"
                         self.down_run_reds = self.consec_red
                         self.pending_entry = True
-                    elif self.consec_green >= 2:
+                    elif self.consec_green >= need:
                         self._entry_side, flip_side = "LONG", "BUY"
                         self.down_run_reds = self.consec_green
                         self.pending_entry = True
