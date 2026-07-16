@@ -206,6 +206,26 @@ class TradingEngine:
                 "from": start.strftime("%Y-%m-%d"), "to": now.strftime("%Y-%m-%d"),
                 "symbol": self.broker.fut_symbol}
 
+    async def _load_history_warmup(self):
+        """Load enough real history for the CURRENT contract to fully warm up the ER window
+        (chop_lookback + buffer bricks). NIFTY prints only ~4 bricks/day at 50-pt, so a fresh
+        month contract needs a generous span; we widen the window until we have enough bricks
+        (capped at 70 days). Called after an expiry roll or a manual contract change so the chop
+        filter is live immediately instead of blocking every entry for days while it warms up."""
+        target = int(self.settings.get("chop_lookback", 50) or 50) + 5
+        res = {}
+        for days in (25, 45, 70):
+            res = await self.load_history(days=days)
+            if not res.get("ok"):
+                return res
+            if len(self.bricks) >= target:
+                break
+        if len(self.bricks) < target:
+            self._set_alert(f"New contract warm-up: only {len(self.bricks)} bricks in 70d history "
+                            f"(ER needs {target}). Chop filter will finish warming up as live "
+                            f"bricks form.", "warning")
+        return res
+
     # -------- strategy backtest (simulation-only: real historical candles, NO orders) --------
     NIFTY_INDEX_TOKEN = "99926000"   # NIFTY 50 index (NSE) — continuous multi-year 1-min history
 
@@ -1378,7 +1398,7 @@ class TradingEngine:
                 asyncio.create_task(self._autoload_after_roll())
 
     async def _autoload_after_roll(self):
-        await self.load_history(days=5)
+        await self._load_history_warmup()
         # True position rollover: if we squared off an OPEN position at expiry, immediately
         # re-open the SAME side on the just-rolled next-month contract (carry across expiry).
         if self._rollover_armed:
@@ -1619,6 +1639,8 @@ class TradingEngine:
             self.brick_seq = 0
             self.consec_red = self.consec_green = self.down_run_reds = 0
             await self._persist_state()
+            # warm up the ER window for the new contract in the background (don't block the response)
+            asyncio.create_task(self._load_history_warmup())
         return res
 
     async def _run_command(self, ctype, payload):
