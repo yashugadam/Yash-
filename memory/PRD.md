@@ -279,3 +279,21 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
       ER threshold + lookback + live ER indicator always visible.
   * Live config remains lb20 / t0.20 / entry_bricks 2 (preview). 31/31 unit tests pass.
   * NOTE: engine default chop_threshold still 0.30, chop_lookback 50 — production must set 0.20/20.
+
+- 2026-07-15 — CODE REVIEW FIXES (bugs found + fixed):
+  * HIGH: Leader failover could strand a position / skip expiry square-off — pending flags weren't
+    persisted and no broker reconcile on takeover. FIX: _state_doc now persists exit_retry_pending,
+    forced_exit_pending, rollover_armed/side, exit_retry_count, pending_adoption; _load_state
+    restores them; new _reconcile_on_takeover() (called in _on_become_leader) reads Angel One net
+    position and clears/adopts/re-arms exit accordingly.
+  * HIGH: Non-variant /backtest ignored the ER filter -> misrepresented the live strategy. FIX:
+    plain backtest now applies chop_filter with live lookback/threshold/entry_bricks. Verified: 60d
+    future now returns 20 trades / Rs38,250 (matches live) instead of the unfiltered 38-trade result.
+  * MEDIUM: load_history/analyze_skips ran inline (could pause the trading loop) and load_history
+    reset bricks under an open position. FIX: both now run as background tasks (_run_command_bg);
+    load_history uses a scratch-pass rebuild that never touches position/consec state when a
+    position/pending exit is open (returns a distinct note).
+  * Verified: 31/31 unit tests pass; /analyze/skips, /angel/load-history, /backtest, /state all OK.
+  * DEFERRED (refactor, not a bug): Renko brick-building is duplicated across _feed_close/_simulate/
+    analyze_skips/load_history — candidate for a shared helper, but risky on the live money path
+    without brick-parity tests; proposed to user, not done.

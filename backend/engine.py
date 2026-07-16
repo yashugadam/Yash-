@@ -175,6 +175,25 @@ class TradingEngine:
             return {"ok": False, "error": self.broker.error or "No historical candles returned"}
         all_candles.sort(key=lambda c: c[0])
 
+        # Never rebuild the chart/counters underneath an OPEN position or an armed rollover — that
+        # would desync the strategy from the live trade. Rebuild the ER window in a scratch pass and
+        # only publish the fresh bricks (leaving position/consec state intact for the live loop).
+        if self.position or self.pending_entry or self.pending_exit:
+            saved = (self.anchor, self.direction, self.brick_seq, self.bricks,
+                     self.consec_red, self.consec_green, self.down_run_reds, self.ticks_in_bar)
+            self.anchor = None; self.direction = 0; self.bricks = []; self.brick_seq = 0
+            for c in all_candles:
+                self._feed_close(float(c[4]), c[0])
+            fresh = self.bricks
+            (self.anchor, self.direction, self.brick_seq, self.bricks,
+             self.consec_red, self.consec_green, self.down_run_reds, self.ticks_in_bar) = saved
+            self.bricks = fresh[-800:] if len(fresh) > len(self.bricks) else self.bricks
+            await self._persist_state()
+            return {"ok": True, "candles": len(all_candles), "bricks": len(self.bricks),
+                    "note": "position open — chart refreshed without touching live strategy state",
+                    "from": start.strftime("%Y-%m-%d"), "to": now.strftime("%Y-%m-%d"),
+                    "symbol": self.broker.fut_symbol}
+
         # rebuild the renko chart from real candle closes (no strategy/orders on history)
         self.anchor = None
         self.direction = 0
@@ -500,9 +519,16 @@ class TradingEngine:
 
         results = []
         best_trades = None
+        # Mirror the LIVE strategy so plain backtests match reality: the ER chop filter is
+        # mandatory live, so apply it here too (using the current live lookback/threshold).
+        live_lb = max(2, int(self.settings.get("chop_lookback", 50) or 50))
+        live_thr = max(0.05, float(self.settings.get("chop_threshold", 0.30) or 0.30))
+        live_entry = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+        eb = entry_bricks or live_entry
         for bs in bricks:
-            summary, trades = self._simulate(all_candles, bs, lot, entry_bricks, exit_bricks,
-                                             cost_per_trade, trend_ema)
+            summary, trades = self._simulate(all_candles, bs, lot, eb, exit_bricks,
+                                             cost_per_trade, trend_ema,
+                                             lookback=live_lb, chop_filter=True, chop_thr=live_thr)
             results.append(summary)
             if best_trades is None or summary["net_pnl"] > best_trades[0]["net_pnl"]:
                 best_trades = (summary, trades)
@@ -1448,6 +1474,12 @@ class TradingEngine:
             "squared_off_date": self.squared_off_date, "feed_mode": self.feed_mode,
             "day_key": self.day_key, "day_realized": self.day_realized,
             "breaker_tripped": self.breaker_tripped,
+            # recovery-critical flags so a leader failover never loses in-flight exit/rollover intent
+            "exit_retry_pending": self.exit_retry_pending,
+            "forced_exit_pending": self.forced_exit_pending,
+            "rollover_armed": self._rollover_armed, "rollover_side": self._rollover_side,
+            "exit_retry_count": self._exit_retry_count,
+            "pending_adoption": self.pending_adoption,
         }
 
     async def _persist_state(self):
@@ -1480,9 +1512,16 @@ class TradingEngine:
         self.feed_mode = "LIVE"
         self.price = self.prev_price = doc.get("price", self.start_price)
         self.running = doc.get("running", False)
-        # In-flight orders cannot be trusted across a crash -> clear flags.
-        # LIVE NOTE: reconcile self.position against Angel One's actual positions here.
+        # In-flight orders cannot be trusted across a crash -> clear order-in-progress flags,
+        # but RESTORE the intent flags (exit-retry / forced-exit / rollover / adoption) so a new
+        # leader keeps trying to flatten/re-open. _reconcile_on_takeover() then verifies vs broker.
         self.pending_entry = self.pending_exit = False
+        self.exit_retry_pending = bool(doc.get("exit_retry_pending"))
+        self.forced_exit_pending = bool(doc.get("forced_exit_pending"))
+        self._rollover_armed = bool(doc.get("rollover_armed"))
+        self._rollover_side = doc.get("rollover_side")
+        self._exit_retry_count = int(doc.get("exit_retry_count", 0) or 0)
+        self.pending_adoption = doc.get("pending_adoption")
         if self.position:
             logger.warning("RECOVERED open position from disk: %s", self.position)
         logger.info("Engine state restored (running=%s, bricks=%d)", self.running, len(self.bricks))
@@ -1583,6 +1622,45 @@ class TradingEngine:
         logger.info("BECAME LEADER (%s)", INSTANCE_ID)
         await self._load_state()      # pick up the latest state persisted by the previous leader
         await self._connect_broker()  # only the leader holds an Angel session
+        await self._reconcile_on_takeover()
+
+    async def _reconcile_on_takeover(self):
+        """After a leader failover, the previous leader may have had an exit/entry in flight or an
+        expiry square-off armed. Reconcile our restored `position` against Angel One's ACTUAL net
+        position so we never strand or double a real trade."""
+        try:
+            if not (self.broker.connected and self.broker.fut_token):
+                return
+            np = await asyncio.to_thread(self.broker.get_net_position)
+            if not np.get("found"):
+                return
+            broker_qty = int(np.get("netqty", 0))
+            if self.position and broker_qty == 0:
+                # the exit filled (or entry never did) during the handover -> we are truly flat
+                logger.warning("TAKEOVER: bot had a %s but broker is flat -> clearing position",
+                               self.position.get("side"))
+                self.position = None
+                self.pending_exit = self.exit_retry_pending = self.forced_exit_pending = False
+                self._exit_retry_count = 0
+            elif (not self.position) and broker_qty != 0:
+                # broker holds a position we lost track of -> adopt it so the strategy manages the exit
+                side = "SHORT" if broker_qty < 0 else "LONG"
+                self.position = {"side": side, "qty": abs(broker_qty),
+                                 "entry_price": np.get("avgprice") or self.price,
+                                 "entry_time": now_iso(), "entry_order_id": "TAKEOVER_ADOPT",
+                                 "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0}
+                logger.warning("TAKEOVER: adopted untracked broker %s (%d qty)", side, abs(broker_qty))
+            elif self.position and broker_qty != 0:
+                self.position["qty"] = abs(broker_qty)   # trust the broker's size
+                # if an exit/square-off was in progress, keep retrying it under the new leader
+                if self.forced_exit_pending or self.exit_retry_pending or \
+                        self.squared_off_date == str(datetime.now(IST).date()):
+                    self.exit_retry_pending = True
+                    logger.warning("TAKEOVER: %s still open with exit pending -> re-arming exit",
+                                   self.position.get("side"))
+            await self._persist_state()
+        except Exception as e:
+            logger.exception("takeover reconcile failed: %s", e)
 
     async def _on_lose_leadership(self):
         logger.info("LOST LEADERSHIP (%s) — disconnecting Angel", INSTANCE_ID)
@@ -1613,9 +1691,9 @@ class TradingEngine:
                 {"$set": {"status": "processing", "claimed_by": INSTANCE_ID}})
             if not claimed:
                 continue
-            # backtest can run for many seconds (fetching years of candles) — run it in the
-            # background so it NEVER pauses the live trading loop. It's read-only (no orders).
-            if c["type"] == "backtest":
+            # These commands can run for many seconds (fetching lots of candles) — run them in
+            # the background so they NEVER pause the live trading loop. All are read-only (no orders).
+            if c["type"] in ("backtest", "load_history", "analyze_skips"):
                 asyncio.create_task(self._run_command_bg(c))
                 continue
             try:
