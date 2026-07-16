@@ -233,7 +233,8 @@ class TradingEngine:
                   cost_per_trade=0.0, trend_ema=0,
                   lookback=0, range_breakout=False, chop_filter=False,
                   chop_thr=0.3, structure=False, exit_chop=False, exit_thr=0.30,
-                  er_adaptive=False, adapt_window=120, adapt_pct=70):
+                  er_adaptive=False, adapt_window=120, adapt_pct=70,
+                  er_rising=False, rise_gap=3):
         """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
         enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
         bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
@@ -277,7 +278,7 @@ class TradingEngine:
         equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
         ema = None; alpha = (2.0 / (trend_ema + 1)) if trend_ema else 0.0
         lb = max(0, int(lookback or 0))
-        pa_on = lb > 0 and (range_breakout or chop_filter or structure or er_adaptive)
+        pa_on = lb > 0 and (range_breakout or chop_filter or structure or er_adaptive or er_rising)
         track_hist = lb > 0 and (pa_on or exit_chop)
         hist = []                       # rolling brick closes (prior to the current brick)
         er_hist = []                    # rolling ER values (for the adaptive/regime threshold)
@@ -358,7 +359,7 @@ class TradingEngine:
                             if structure:
                                 long_ok = long_ok and close > win[0]
                                 short_ok = short_ok and close < win[0]
-                            if chop_filter or er_adaptive:
+                            if chop_filter or er_adaptive or er_rising:
                                 er, _ = _er_dir(close)
                                 if er is None:
                                     long_ok = short_ok = False
@@ -369,6 +370,8 @@ class TradingEngine:
                                         thr_dyn = chop_thr
                                     if er < thr_dyn:
                                         long_ok = short_ok = False
+                                    if er_rising and len(er_hist) >= rise_gap and er <= er_hist[-rise_gap]:
+                                        long_ok = short_ok = False
                     if b["color"] == "red" and consec_red >= entry_bricks and short_ok:
                         position = {"side": "SHORT", "entry": close, "entry_time": b["time"]}
                     elif b["color"] == "green" and consec_green >= entry_bricks and long_ok:
@@ -378,12 +381,12 @@ class TradingEngine:
                     hist.append(close)
                     if len(hist) > lb + 5:
                         hist = hist[-(lb + 5):]
-                    if er_adaptive:
+                    if er_adaptive or er_rising:
                         e2, _ = _er_dir(close)
                         if e2 is not None:
                             er_hist.append(e2)
-                            if len(er_hist) > adapt_window:
-                                er_hist = er_hist[-adapt_window:]
+                            if len(er_hist) > max(adapt_window, rise_gap + 2):
+                                er_hist = er_hist[-max(adapt_window, rise_gap + 2):]
 
         n = len(trades)
         net = round(sum(t["pnl"] for t in trades), 2)
@@ -394,6 +397,7 @@ class TradingEngine:
             "chop_filter": bool(chop_filter), "chop_thr": chop_thr, "structure": bool(structure),
             "exit_chop": bool(exit_chop), "exit_thr": exit_thr,
             "er_adaptive": bool(er_adaptive), "adapt_window": adapt_window, "adapt_pct": adapt_pct,
+            "er_rising": bool(er_rising), "rise_gap": rise_gap,
             "trades": n, "wins": wins, "losses": n - wins,
             "win_rate": round(100 * wins / n, 1) if n else 0.0,
             "net_pnl": net, "net_points": round(sum(t["points"] for t in trades), 2),
@@ -480,7 +484,9 @@ class TradingEngine:
                                       float(v.get("exit_thr", 0.30)),
                                       bool(v.get("er_adaptive", False)),
                                       int(v.get("adapt_window", 120)),
-                                      float(v.get("adapt_pct", 70)))
+                                      float(v.get("adapt_pct", 70)),
+                                      bool(v.get("er_rising", False)),
+                                      int(v.get("rise_gap", 3)))
                 s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
                                                  f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
                 if v.get("include_trades"):
