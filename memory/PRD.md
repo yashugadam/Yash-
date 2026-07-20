@@ -297,3 +297,17 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * DEFERRED (refactor, not a bug): Renko brick-building is duplicated across _feed_close/_simulate/
     analyze_skips/load_history — candidate for a shared helper, but risky on the live money path
     without brick-parity tests; proposed to user, not done.
+
+- 2026-07-20 — FEATURE: ER-Unlock projection markers (LONG/SHORT arming price):
+  * User asked to mark ahead-of-time the price/brick at which the ER gate (>=threshold) + the
+    consecutive-brick entry rule will BOTH be satisfied, on both long and short sides.
+  * Backend: new engine.er_projection(max_bricks=15) — from current bricks, simulates consecutive
+    same-colour bricks (fixed brick_size steps) each side, slides the ER window, returns the first
+    unlock {unlock_price, bricks, er} for LONG and SHORT plus current_er/threshold/entry_bricks.
+    Exposed in snapshot() as "er_projection" (served via /api/state; recalculates each tick/brick).
+  * Frontend: RenkoChart draws two dashed reference lines (green LONG-arms / red SHORT-arms) with
+    price-axis labels; ChartPanel adds an "ER UNLOCK" readout bar (current ER, threshold, two pills
+    with unlock price + brick count). Chart y-range extends to keep projected lines on-screen.
+  * Verified: curl /api/state (authed) returns correct projection (LONG >=24400 +6brk ER0.231,
+    SHORT <=23900 +4brk ER0.259 at last close 24100, thr0.2); screenshot confirms lines + readout.
+  * NOTE: projection is a live "if market keeps going this way" guide — slides every new brick.

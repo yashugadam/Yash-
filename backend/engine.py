@@ -700,6 +700,53 @@ class TradingEngine:
         thr = max(0.05, float(self.settings.get("chop_threshold", 0.30) or 0.30))
         return er >= thr, round(er, 3)
 
+    def er_projection(self, max_bricks=15):
+        """Forward projection: from the CURRENT bricks, simulate consecutive same-colour bricks
+        (each a fixed brick_size step) on both sides and find the first price at which the ER
+        entry gate (>= threshold) AND the consecutive-brick entry rule are BOTH satisfied.
+        Lets the UI mark the 'LONG arms @ price' and 'SHORT arms @ price' levels ahead of time.
+        Purely informational — recomputes every time a new brick forms (window slides)."""
+        bs = int(self.settings.get("brick_size", 50) or 50)
+        lb = max(2, int(self.settings.get("chop_lookback", 50) or 50))
+        thr = max(0.05, float(self.settings.get("chop_threshold", 0.30) or 0.30))
+        need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
+        on = bool(self.settings.get("chop_filter"))
+        closes = [b["close"] for b in self.bricks]
+        last = closes[-1] if closes else round(self.price, 2)
+        cur_er = self._chop_ok()[1] if on else None
+
+        def _er(seq):
+            w = seq[-(lb + 1):]
+            if len(w) < lb + 1:
+                return None
+            p = sum(abs(w[i] - w[i - 1]) for i in range(1, len(w)))
+            return abs(w[-1] - w[0]) / p if p else 0.0
+
+        def project(step, base_consec):
+            seq = list(closes)
+            price = last
+            for k in range(1, max_bricks + 1):
+                price = round(price + step, 2)
+                seq.append(price)
+                consec = base_consec + k
+                e = _er(seq)
+                gate = (e is not None and e >= thr) if on else True
+                if gate and consec >= need:
+                    return {"unlock_price": price, "bricks": k,
+                            "er": (round(e, 3) if e is not None else None)}
+            return {"unlock_price": None, "bricks": None, "er": None}
+
+        return {
+            "enabled": on,
+            "current_er": cur_er,
+            "threshold": round(thr, 3),
+            "entry_bricks": need,
+            "brick_size": bs,
+            "last_close": last,
+            "long": project(bs, self.consec_green),
+            "short": project(-bs, self.consec_red),
+        }
+
     def _process_brick(self, brick):
         color = brick["color"]
         if color == "red":
@@ -1978,6 +2025,7 @@ class TradingEngine:
             "chop_er": self._chop_ok()[1],
             "chop_threshold": float(self.settings.get("chop_threshold", 0.30) or 0.30),
             "entry_bricks": int(self.settings.get("entry_bricks", 2) or 2),
+            "er_projection": self.er_projection(),
             "ticks_in_bar": self.ticks_in_bar,
             "orders": self.orders[:12],
             "expiry": {

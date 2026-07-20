@@ -26,7 +26,7 @@ const MIN_ZOOM = 0.18;
 const MAX_ZOOM = 4;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-export const RenkoChart = ({ bricks, trades }) => {
+export const RenkoChart = ({ bricks, trades, erProjection }) => {
   const scrollRef = useRef(null);
   const pinnedRef = useRef(true);
   const focusRef = useRef(null);     // {idx, offset} to keep focal point on zoom
@@ -44,10 +44,14 @@ export const RenkoChart = ({ bricks, trades }) => {
   const gap = BASE_GAP * zoom;
   const step = brickW + gap;
 
-  const { rects, levels, totalW, timeTicks, tradeMarks } = useMemo(() => {
-    if (!bricks || bricks.length === 0) return { rects: [], levels: [], totalW: 0, timeTicks: [], tradeMarks: [] };
+  const { rects, levels, totalW, timeTicks, tradeMarks, erLines } = useMemo(() => {
+    if (!bricks || bricks.length === 0) return { rects: [], levels: [], totalW: 0, timeTicks: [], tradeMarks: [], erLines: [] };
     let min = Infinity, max = -Infinity;
     bricks.forEach((b) => { min = Math.min(min, b.open, b.close); max = Math.max(max, b.open, b.close); });
+    // extend the visible range so the ER-unlock lines stay on-chart even when projected beyond bricks
+    const longUp = erProjection?.long?.unlock_price;
+    const shortUp = erProjection?.short?.unlock_price;
+    [longUp, shortUp].forEach((p) => { if (p != null) { min = Math.min(min, p); max = Math.max(max, p); } });
     const range = max - min || 50;
     const pad = range * 0.1;
     min -= pad; max += pad;
@@ -82,6 +86,20 @@ export const RenkoChart = ({ bricks, trades }) => {
 
     const totalW = leftPad + bricks.length * step + rightAxis;
 
+    // ER-unlock reference lines: the price at which each side's ER gate arms
+    const erLines = [];
+    if (erProjection?.enabled) {
+      const L = erProjection.long, S = erProjection.short;
+      if (L?.unlock_price != null)
+        erLines.push({ key: "long", y: yScale(L.unlock_price), price: L.unlock_price,
+          bricks: L.bricks, er: L.er, color: "#10B981",
+          label: `LONG arms \u2265 ${L.unlock_price} \u00b7 +${L.bricks} brk \u00b7 ER ${L.er}` });
+      if (S?.unlock_price != null)
+        erLines.push({ key: "short", y: yScale(S.unlock_price), price: S.unlock_price,
+          bricks: S.bricks, er: S.er, color: "#EF4444",
+          label: `SHORT arms \u2264 ${S.unlock_price} \u00b7 +${S.bricks} brk \u00b7 ER ${S.er}` });
+    }
+
     // overlay closed trades: SELL marker at entry, BUY/cover at exit, connector colored by P&L
     const tBrick = bricks.map((b) => new Date(b.time).getTime());
     const firstT = tBrick[0], lastT = tBrick[tBrick.length - 1];
@@ -110,8 +128,8 @@ export const RenkoChart = ({ bricks, trades }) => {
         };
       });
 
-    return { rects, levels, totalW, timeTicks, tradeMarks };
-  }, [bricks, trades, chartH, step, brickW]);
+    return { rects, levels, totalW, timeTicks, tradeMarks, erLines };
+  }, [bricks, trades, chartH, step, brickW, erProjection]);
 
   // keep focal point under cursor after a zoom; else auto-scroll to latest when pinned
   useEffect(() => {
@@ -206,6 +224,18 @@ export const RenkoChart = ({ bricks, trades }) => {
           {levels.map((l, i) => (
             <line key={`lv-${i}`} x1={0} x2={svgW - rightAxis} y1={l.y} y2={l.y} stroke="#F1F5F9" strokeWidth="1" />
           ))}
+          {/* ER-unlock reference lines (LONG green / SHORT red) */}
+          {erLines.map((e) => (
+            <g key={`er-${e.key}`} data-testid={`er-unlock-${e.key}`}>
+              <title>{e.label}</title>
+              <line x1={0} x2={svgW - rightAxis} y1={e.y} y2={e.y} stroke={e.color}
+                strokeWidth="1.4" strokeDasharray="6 4" opacity="0.9" />
+              <rect x={leftPad} y={e.y - 15} width={e.label.length * 5.6 + 10} height={13}
+                fill={e.color} opacity="0.92" rx="2" />
+              <text x={leftPad + 5} y={e.y - 5} fontSize="9" fill="#fff"
+                fontFamily="IBM Plex Mono">{e.label}</text>
+            </g>
+          ))}
           {rects.map((r) => (
             <g key={`brick-${r.index}`}>
               <title>{fmtDate(r.time)} {fmtTime(r.time)} · {r.open} → {r.close}</title>
@@ -261,6 +291,12 @@ export const RenkoChart = ({ bricks, trades }) => {
         <svg width={rightAxis} height={H} className="block bg-white border-l border-slate-100">
           {levels.map((l) => (
             <text key={`px-${l.price}`} x={6} y={l.y + 4} fontSize="10" fontFamily="IBM Plex Mono" fill="#64748B">{l.price}</text>
+          ))}
+          {erLines.map((e) => (
+            <g key={`pxer-${e.key}`}>
+              <rect x={0} y={e.y - 7} width={rightAxis} height={14} fill={e.color} opacity="0.92" />
+              <text x={6} y={e.y + 4} fontSize="10" fontFamily="IBM Plex Mono" fill="#fff">{e.price}</text>
+            </g>
           ))}
         </svg>
       </div>
