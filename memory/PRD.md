@@ -372,3 +372,16 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Also: corrected a preview-only settings drift (had shown 50/0.3) back to 20/0.20 via the settings
     API and confirmed it persists across restart — settings load/persist has NO reset bug; production
     settings verified intact (lb20/thr0.20/entry2).
+
+- 2026-07-21 — FEATURE: Pre-open warm-up (auto-arm before 09:15):
+  * engine._maybe_preopen_warmup(): on a trading weekday, in the 09:05–09:15 IST window, once per
+    day (while the bot is running), it (1) ensures the Angel One session + instrument are connected
+    — reconnecting if the overnight session dropped — and (2) warms the ER window via
+    _load_history_warmup() if bricks < chop_lookback+5, so the chop filter is live from the first
+    live brick instead of sitting out while it warms up. Emits progress + "armed, ready for open"
+    alerts. Called from the market-closed branch of the leader tick loop.
+  * Runs only when the bot is RUNNING (consistent with connect-on-run). If it can't connect (session
+    held elsewhere) it retries next tick without marking the day done.
+  * Verified: gate logic unit-tested (runs Mon 09:10; idempotent on 2nd call; skips 10:00 and
+    Saturday); backend imports OK; live backend healthy; preview stays stopped/disconnected.
+    REQUIRES REDEPLOY + bot left running for production to auto-arm before open.

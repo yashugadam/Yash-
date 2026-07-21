@@ -101,6 +101,8 @@ class TradingEngine:
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
         self._open_recon_date: Optional[str] = None     # IST date we already ran the market-open safety reconcile
         self._scrip_refresh_date: Optional[str] = None   # IST date we last refreshed the scrip-master cache
+        self._preopen_date: Optional[str] = None          # IST date we already ran the pre-open warm-up
+        self._preopen_busy = False                         # guard so warm-up runs once at a time
         self.is_leader = False                           # True only on the pod that holds the trading lease
         self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
@@ -1724,6 +1726,41 @@ class TradingEngine:
         logger.info("Daily scrip-master refresh (contract freshness)")
         asyncio.create_task(self._refresh_scrip_master())
 
+    async def _maybe_preopen_warmup(self):
+        """A few minutes before the 09:15 open (trading weekday), make the bot fully armed the
+        instant the market opens: (1) ensure the Angel One session + instrument are connected
+        (reconnect if the overnight session dropped), and (2) warm the ER window with real history
+        so the chop filter is live from the very first brick instead of sitting out while it warms
+        up. Runs once per day; only while the bot is running (it lives in the market-closed branch)."""
+        ist = datetime.now(IST)
+        if ist.weekday() >= 5:
+            return
+        if not (dtime(9, 5) <= ist.time() < dtime(9, 15)):
+            return
+        today = ist.date().isoformat()
+        if self._preopen_date == today or self._preopen_busy:
+            return
+        self._preopen_busy = True
+        try:
+            if not self.broker.connected:
+                self._set_alert("Pre-open warm-up: connecting to Angel One before the 09:15 open…", "info")
+                await self._connect_broker()
+            if not self.broker.connected:
+                return   # couldn't connect (session held elsewhere?) — retry next tick, don't mark done
+            need = int(self.settings.get("chop_lookback", 50) or 50) + 5
+            if len(self.bricks) < need:
+                self._set_alert("Pre-open warm-up: loading history to fill the ER window…", "info")
+                await self._load_history_warmup()
+            self._preopen_date = today
+            await self._persist_state()
+            self._set_alert(f"Pre-open warm-up complete — armed on "
+                            f"{self.broker.fut_symbol or 'contract'} with {len(self.bricks)} bricks. "
+                            f"Ready for the 09:15 open.", "info")
+        except Exception as e:
+            logger.warning("pre-open warm-up failed: %s", e)
+        finally:
+            self._preopen_busy = False
+
     async def _on_become_leader(self):
         logger.info("BECAME LEADER (%s)", INSTANCE_ID)
         await self._load_state()      # pick up the latest state persisted by the previous leader
@@ -2003,6 +2040,7 @@ class TradingEngine:
                         # exits, no circuit-breaker action — the open position is held
                         # untouched (carry-forward) until the next session at 09:15 IST.
                         self.ticks_in_bar = 0
+                        await self._maybe_preopen_warmup()   # arm the bot just before the 09:15 open
                         if not self._mkt_paused:
                             self._mkt_paused = True
                             self._set_alert("Market closed — strategy paused; position held. "
