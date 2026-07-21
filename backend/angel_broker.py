@@ -120,7 +120,7 @@ class AngelBroker:
         self.last_ltp = None
         self.last_ltp_ts = 0.0
 
-    def login(self, api_key, client_code, pin, totp_secret):
+    def login(self, api_key, client_code, pin, totp_secret, resolve_futures=True):
         self.error = ""
         self.api_key, self.client_code, self._pin, self._totp = api_key, client_code, pin, totp_secret
         try:
@@ -147,7 +147,8 @@ class AngelBroker:
             except Exception:
                 self.profile_name = ""
             self.connected = True
-            self._resolve_nifty_fut()
+            if resolve_futures:
+                self._resolve_nifty_fut()
             self.start_feed()   # begin streaming LTP over the websocket (no REST polling)
             logger.info("Angel connected (%s), future=%s token=%s", client_code,
                         self.fut_symbol, self.fut_token)
@@ -160,12 +161,25 @@ class AngelBroker:
             return {"connected": False, "error": self.error}
 
     def _resolve_nifty_fut(self):
-        """Find the nearest-expiry NIFTY index future from the scrip master."""
-        try:
-            rows = requests.get(SCRIP_MASTER_URL, timeout=30).json()
-        except Exception as e:
-            logger.warning("scrip master download failed: %s", e)
-            return
+        """Find the nearest-expiry NIFTY index future from the scrip master.
+        The scrip master is a large (~35 MB) JSON that can take 1-2 minutes to download, so we
+        use a generous read timeout, a browser-like User-Agent and a couple of retries — a short
+        timeout here leaves the bot connected but with NO tradable contract. Returns True on
+        success. On failure the caller falls back to the persisted futures cache."""
+        rows = None
+        headers = {"User-Agent": "Mozilla/5.0 (renko-bot)"}
+        for attempt in range(1, 4):
+            try:
+                r = requests.get(SCRIP_MASTER_URL, timeout=(15, 180), headers=headers)
+                r.raise_for_status()
+                rows = r.json()
+                break
+            except Exception as e:
+                logger.warning("scrip master download attempt %d/3 failed: %s", attempt, e)
+                time.sleep(2 * attempt)
+        if not rows:
+            logger.warning("scrip master download failed after retries — will use cache if available")
+            return False
         today = date.today()
         self.futures = []          # cache of tradable NFO futures (NIFTY, BANKNIFTY, stocks…)
         best = None
@@ -205,6 +219,37 @@ class AngelBroker:
                 self.fut_lotsize = int(best.get("lotsize"))
             except Exception:
                 self.fut_lotsize = None
+        return bool(self.futures)
+
+    def snapshot_futures(self):
+        """Serialisable copy of the tradable-futures cache (for persisting to Mongo)."""
+        return [{**f, "expiry": f["expiry"].isoformat()} for f in self.futures]
+
+    def restore_futures(self, rows):
+        """Rebuild the futures cache from a persisted snapshot when the live scrip-master
+        download fails. Drops any already-expired contracts and, if no instrument is selected,
+        defaults to the nearest-expiry NIFTY index future. Returns True if a contract is set."""
+        today = date.today()
+        restored = []
+        for r in (rows or []):
+            try:
+                exp = date.fromisoformat(r["expiry"])
+            except Exception:
+                continue
+            if exp < today:
+                continue
+            restored.append({**r, "expiry": exp})
+        if not restored:
+            return bool(self.fut_token)
+        self.futures = restored
+        if not self.fut_token:
+            nifty = [f for f in self.futures if f["type"] == "FUTIDX" and f["name"] == "NIFTY"]
+            if nifty:
+                best = min(nifty, key=lambda f: f["expiry"])
+                self.fut_symbol = best["symbol"]; self.fut_token = best["token"]
+                self.fut_expiry = best["expiry"].isoformat(); self.fut_lotsize = best["lotsize"]
+                self.fut_name = best["name"]; self.fut_type = best["type"]
+        return bool(self.fut_token)
 
     def search_futures(self, query="", limit=40):
         q = (query or "").upper().strip()
@@ -249,10 +294,12 @@ class AngelBroker:
         return self.select_instrument(cands[0]["token"])
 
     def relogin(self):
-        """Re-establish the session (e.g. after token expiry) using stored creds."""
+        """Re-establish the session (e.g. after token expiry) using stored creds. Skips the
+        heavy scrip-master download — the selected contract is already held in memory, so we just
+        re-auth and restart the streaming feed."""
         if not (self.api_key and self.client_code and self._pin and self._totp):
             return False
-        res = self.login(self.api_key, self.client_code, self._pin, self._totp)
+        res = self.login(self.api_key, self.client_code, self._pin, self._totp, resolve_futures=False)
         return bool(res.get("connected"))
 
     # -------- live LTP streaming feed (SmartWebSocketV2) --------

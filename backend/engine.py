@@ -1654,16 +1654,61 @@ class TradingEngine:
         totp_secret = os.environ.get("ANGEL_TOTP_SECRET", "").strip()
         if not all([api_key, client_code, pin, totp_secret]):
             return {"connected": False, "error": "Missing Angel One credentials in .env"}
-        res = await asyncio.to_thread(self.broker.login, api_key, client_code, pin, totp_secret)
+        # Log in WITHOUT the slow (~35 MB, ~2 min) scrip-master download — that would block the
+        # trading loop and time out the connect request. Resolve the instrument instantly from the
+        # persisted cache, then refresh the scrip master in the background.
+        res = await asyncio.to_thread(self.broker.login, api_key, client_code, pin, totp_secret, False)
         if res.get("connected"):
+            cache = await self.db.scrip_cache.find_one({"_id": "nfo_futures"})
+            if cache and cache.get("rows"):
+                self.broker.restore_futures(cache["rows"])
             saved = self.settings.get("instrument_token")
-            if saved:
+            if saved and self.broker.futures:
                 sel = self.broker.select_instrument(saved)
                 if sel.get("ok"):
                     res["future"] = sel["symbol"]
+            if self.broker.fut_token:
+                await asyncio.to_thread(self.broker.start_feed)
+                res["future"] = self.broker.fut_symbol
+            else:
+                self._set_alert("Connected to Angel One — loading the instrument list "
+                                "(first-time download, may take up to ~2 min). Trading will arm "
+                                "as soon as the NIFTY contract resolves.", "info")
             self.feed_mode = "LIVE"
-            logger.info("Leader connected to Angel One; LIVE feed active")
+            # Background: (re)download the scrip master to pick up new contracts + persist the cache.
+            asyncio.create_task(self._refresh_scrip_master())
+            logger.info("Leader connected to Angel One; LIVE feed active (contract=%s)",
+                        self.broker.fut_symbol or "PENDING")
         return res
+
+    async def _refresh_scrip_master(self):
+        """Download the Angel scrip master OFF the hot path, refresh the tradable-futures cache,
+        persist it to Mongo, and (if no contract was resolved from cache yet) select the default
+        NIFTY future and start the feed. Never blocks connect/trading."""
+        try:
+            had_token = bool(self.broker.fut_token)
+            ok = await asyncio.to_thread(self.broker._resolve_nifty_fut)
+            if not ok or not self.broker.futures:
+                return
+            try:
+                await self.db.scrip_cache.replace_one(
+                    {"_id": "nfo_futures"},
+                    {"_id": "nfo_futures", "rows": self.broker.snapshot_futures(),
+                     "ts": now_iso()}, upsert=True)
+            except Exception as e:
+                logger.warning("scrip cache save failed: %s", e)
+            # Cold start (no cache) — a contract just got resolved. Honour any saved selection,
+            # then start the live feed now that we finally have a token.
+            if not had_token and self.broker.fut_token:
+                saved = self.settings.get("instrument_token")
+                if saved:
+                    self.broker.select_instrument(saved)
+                await asyncio.to_thread(self.broker.start_feed)
+                self._set_alert(f"Instrument list loaded — trading contract "
+                                f"{self.broker.fut_symbol}. Bot is armed.", "info")
+                await self._persist_state()
+        except Exception as e:
+            logger.warning("scrip master refresh failed: %s", e)
 
     async def _on_become_leader(self):
         logger.info("BECAME LEADER (%s)", INSTANCE_ID)

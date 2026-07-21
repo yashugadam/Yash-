@@ -328,3 +328,27 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Verified on preview: after restart, leader elected, running=False, angel_connected=False (no
     session grabbed). Strategy suite 31/31 pass. NOTE: NOT started on preview (would place REAL orders
     + re-grab the session). REQUIRES REDEPLOY to take effect on production.
+
+- 2026-07-21 — FIX (ROOT CAUSE): "Angel One not connected" / no tradable contract on production:
+  * Root cause: the Angel scrip-master JSON is ~35 MB and takes ~116s to download, but
+    angel_broker._resolve_nifty_fut() used requests.get(timeout=30). It timed out → self.futures
+    empty → fut_symbol/fut_token='' → bot "connected" but with NO instrument (can't stream/trade).
+    Also the connect command ran inline on the leader and the /angel/connect relay timed out at 25s.
+  * Fixes (angel_broker.py):
+    - _resolve_nifty_fut(): timeout=(15,180), browser User-Agent, 3 retries w/ backoff; returns bool.
+    - Added snapshot_futures() / restore_futures(rows) to persist & rebuild the futures cache.
+    - login(..., resolve_futures=True): new flag; relogin() now passes False (fast reconnect, keeps
+      in-memory contract, restarts feed) — no heavy download on auto-reconnect.
+  * Fixes (engine.py):
+    - _connect_broker(): logs in WITHOUT the download (resolve_futures=False) so connect is instant;
+      restores the instrument from Mongo scrip_cache immediately; starts the feed; then kicks off
+      _refresh_scrip_master() in the BACKGROUND.
+    - _refresh_scrip_master(): downloads scrip master off the hot path, refreshes+persists the
+      Mongo scrip_cache, and on a cold start (no cache) selects the default NIFTY future + starts
+      the feed once resolved (alerts "Instrument list loaded — Bot is armed").
+  * Behaviour: first-ever connect with an empty cache resolves the contract within ~2 min in the
+    background (no loop freeze, no relay timeout); every later connect/restart is instant from cache.
+  * Verified: offline _resolve_nifty_fut -> 658 futures, NIFTY28JUL26FUT/token 61093/lot 65;
+    snapshot<->restore round-trips; seeded preview scrip_cache (658 rows); backend healthy;
+    31/31 strategy tests pass. NOT connected live on preview (would steal production's single Angel
+    session). REQUIRES REDEPLOY; production self-heals within ~2 min of the next connect/Start.
