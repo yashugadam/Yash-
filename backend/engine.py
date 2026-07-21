@@ -1668,8 +1668,14 @@ class TradingEngine:
     async def _on_become_leader(self):
         logger.info("BECAME LEADER (%s)", INSTANCE_ID)
         await self._load_state()      # pick up the latest state persisted by the previous leader
-        await self._connect_broker()  # only the leader holds an Angel session
-        await self._reconcile_on_takeover()
+        # Angel One allows only ONE live session per account. To avoid preview & production
+        # fighting over the single session, the leader grabs the broker session ONLY when the
+        # bot is actually running (started). A stopped bot (e.g. the preview/dev environment)
+        # never connects, leaving the session free for the running (production) environment.
+        # The user can still connect manually anytime via the "connect" command.
+        if self.running:
+            await self._connect_broker()  # only a RUNNING leader holds an Angel session
+            await self._reconcile_on_takeover()
 
     async def _reconcile_on_takeover(self):
         """After a leader failover, the previous leader may have had an exit/entry in flight or an
@@ -1778,8 +1784,13 @@ class TradingEngine:
         if ctype == "start":
             self.running = True
             await self._persist_state()
+            # Connect to Angel One on Start (the leader only holds a broker session while
+            # running). If another environment currently holds the single Angel session this
+            # login may fail — surfaced to the user, who can retry once the other side frees it.
+            if not self.broker.connected:
+                await self._connect_broker()
             await self._on_start()
-            return {"running": True}
+            return {"running": True, "angel_connected": self.broker.connected}
         if ctype == "stop":
             squared = False
             if payload.get("square_off") and self.position and not self.pending_exit:

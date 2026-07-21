@@ -311,3 +311,20 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Verified: curl /api/state (authed) returns correct projection (LONG >=24400 +6brk ER0.231,
     SHORT <=23900 +4brk ER0.259 at last close 24100, thr0.2); screenshot confirms lines + readout.
   * NOTE: projection is a live "if market keeps going this way" guide — slides every new brick.
+
+- 2026-07-21 — FIX: Angel One single-session conflict between preview & production:
+  * Angel One allows only ONE live websocket/session per account. Preview + production shared the
+    same credentials, so whichever connected last won; the other saw "429 Connection Limit Exceeded"
+    and could not connect (user reported "Angel One not connected" on production).
+  * DURABLE FIX (user-approved): the leader now grabs the Angel session ONLY when the bot is RUNNING.
+    - engine._on_become_leader(): calls _connect_broker()+_reconcile_on_takeover() only if self.running.
+      A STOPPED bot (preview/dev) never connects → leaves the single session free for production.
+    - "start" command now calls _connect_broker() if not already connected (production connects the
+      moment the user presses Start), then _on_start(); returns angel_connected in result.
+    - Manual "Connect Angel One" (connect command) still works anytime regardless of running.
+    - Auto-reconnect (relogin) unaffected — creds are set by the Start-time _connect_broker/login.
+  * Behaviour: preview stays stopped → never steals the session; production keeps running=True in its
+    persisted state → auto-connects on every restart/leader-takeover as before.
+  * Verified on preview: after restart, leader elected, running=False, angel_connected=False (no
+    session grabbed). Strategy suite 31/31 pass. NOTE: NOT started on preview (would place REAL orders
+    + re-grab the session). REQUIRES REDEPLOY to take effect on production.
