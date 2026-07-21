@@ -30,9 +30,26 @@ export function DashboardHeader({ state, flash, priceUp, reset, setShowBacktest,
               <AlertTriangle className="h-3 w-3" /> Trading pod idle
             </span>
           )}
-          <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${state.angel?.connected ? "bg-blue-100 text-blue-800 border-blue-200" : "bg-red-100 text-red-700 border-red-200"}`} data-testid="feed-badge" title={state.angel?.streaming ? "Live LTP streaming over websocket" : (state.feed_error || "")}>
-            <Activity className="h-3 w-3" /> {state.angel?.connected ? (state.angel?.streaming ? "Streaming" : "Live Data") : "Disconnected"}
-          </span>
+          {(() => {
+            const a = state.angel || {};
+            const label = !a.connected ? "Disconnected"
+              : !a.future ? "Loading instruments…"
+              : a.streaming ? `Streaming · ${a.future}` : `Armed · ${a.future}`;
+            const cls = !a.connected ? "bg-red-100 text-red-700 border-red-200"
+              : !a.future ? "bg-amber-100 text-amber-800 border-amber-200 animate-pulse"
+              : a.streaming ? "bg-emerald-100 text-emerald-800 border-emerald-200"
+              : "bg-blue-100 text-blue-800 border-blue-200";
+            const tip = !a.connected ? (state.feed_error || "Angel One not connected")
+              : !a.future ? "Connected — downloading the instrument list (first-time can take ~2 min). Trading arms once the NIFTY contract resolves."
+              : a.streaming ? "Live LTP streaming over websocket"
+              : (state.feed_error || `Armed on ${a.future} — live feed starts at market open`);
+            return (
+              <span className={`px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1 border ${cls}`}
+                data-testid="feed-badge" title={tip}>
+                <Activity className="h-3 w-3" /> {label}
+              </span>
+            );
+          })()}
           <span className="bg-red-600 text-white border border-red-700 px-2 py-1 text-[11px] font-mono uppercase flex items-center gap-1" data-testid="mode-badge" title="This bot trades LIVE with real money on Angel One">
             <Zap className="h-3 w-3" /> Live · Real Money
           </span>

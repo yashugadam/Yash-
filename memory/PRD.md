@@ -352,3 +352,23 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     snapshot<->restore round-trips; seeded preview scrip_cache (658 rows); backend healthy;
     31/31 strategy tests pass. NOT connected live on preview (would steal production's single Angel
     session). REQUIRES REDEPLOY; production self-heals within ~2 min of the next connect/Start.
+
+- 2026-07-21 — FEATURES: contract freshness + connection status banner:
+  * Contract Freshness (engine.py): new _maybe_daily_scrip_refresh() runs once per IST day (while
+    running & connected) and kicks _refresh_scrip_master() in the background, so a newly listed
+    month's contract is always cached before market open. Never changes the active contract (that
+    only rolls at expiry) — just keeps the futures cache/dropdown/roll targets current.
+  * Connection Banner:
+    - DashboardHeader feed-badge now shows 4 clear states: "Disconnected" (red) / "Loading
+      instruments…" (amber, pulsing — connected but contract not resolved yet) / "Armed · <symbol>"
+      (blue) / "Streaming · <symbol>" (green), each with an explanatory tooltip.
+    - AngelPanel: added a status banner at the top of the connected view (amber "Loading instrument
+      list…" vs emerald "Armed on <symbol> / Streaming live"), and the right badge now shows
+      Loading…/Armed. Fixed a DANGEROUS stale line that claimed "orders stay PAPER. No real orders" —
+      now correctly states "LIVE trading — real orders are placed with real money."
+  * Verified: backend imports OK, 31/31 strategy tests pass, header badge renders "DISCONNECTED"
+    correctly (screenshot). Connected-state banners are conditional JSX not shown live on preview
+    (connecting would steal production's single Angel session). REQUIRES REDEPLOY for production.
+  * Also: corrected a preview-only settings drift (had shown 50/0.3) back to 20/0.20 via the settings
+    API and confirmed it persists across restart — settings load/persist has NO reset bug; production
+    settings verified intact (lb20/thr0.20/entry2).

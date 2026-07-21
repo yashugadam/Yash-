@@ -100,6 +100,7 @@ class TradingEngine:
         self._last_pnl_fetch = 0.0
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
         self._open_recon_date: Optional[str] = None     # IST date we already ran the market-open safety reconcile
+        self._scrip_refresh_date: Optional[str] = None   # IST date we last refreshed the scrip-master cache
         self.is_leader = False                           # True only on the pod that holds the trading lease
         self._exit_retry_count = 0                     # consecutive rejected EXITs (hammer guard)
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
@@ -1710,6 +1711,19 @@ class TradingEngine:
         except Exception as e:
             logger.warning("scrip master refresh failed: %s", e)
 
+    async def _maybe_daily_scrip_refresh(self):
+        """Once per IST day (while connected), refresh the scrip-master cache in the background so
+        a newly listed month's contract is always available before market open. Never changes the
+        currently selected contract (that only rolls at expiry) — it just keeps the cache current."""
+        if not self.broker.connected:
+            return
+        today = datetime.now(IST).date().isoformat()
+        if self._scrip_refresh_date == today:
+            return
+        self._scrip_refresh_date = today
+        logger.info("Daily scrip-master refresh (contract freshness)")
+        asyncio.create_task(self._refresh_scrip_master())
+
     async def _on_become_leader(self):
         logger.info("BECAME LEADER (%s)", INSTANCE_ID)
         await self._load_state()      # pick up the latest state persisted by the previous leader
@@ -1929,6 +1943,7 @@ class TradingEngine:
                 await self._process_commands()
                 await self._refresh_broker_pnl()
                 if self.running:
+                    await self._maybe_daily_scrip_refresh()   # keep the contract list fresh each morning
                     if self._market_open():
                         if self._mkt_paused:
                             self._mkt_paused = False
