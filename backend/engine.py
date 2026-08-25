@@ -99,6 +99,7 @@ class TradingEngine:
         self.broker_pnl = {"found": False, "realised": 0.0, "unrealised": 0.0, "total": 0.0}
         self._last_pnl_fetch = 0.0
         self._mkt_paused = False                       # True while strategy is frozen (market closed)
+        self._catchup_on_open = False                  # arm a one-time standing-setup entry at session open / after roll
         self._open_recon_date: Optional[str] = None     # IST date we already ran the market-open safety reconcile
         self._scrip_refresh_date: Optional[str] = None   # IST date we last refreshed the scrip-master cache
         self._preopen_date: Optional[str] = None          # IST date we already ran the pre-open warm-up
@@ -1487,6 +1488,10 @@ class TradingEngine:
             self._rollover_armed = False
             await self._rollover_enter()
             self._rollover_side = None
+        elif self._market_open():
+            # Flat after the roll: the warm-up rebuilt the chart but never places orders, so
+            # catch any standing entry setup on the new contract instead of waiting for a brick.
+            self._catchup_on_open = True
 
     async def _rollover_enter(self):
         """Open a fresh position (same side as the one squared off) on the newly-rolled
@@ -1984,6 +1989,7 @@ class TradingEngine:
                     if self._market_open():
                         if self._mkt_paused:
                             self._mkt_paused = False
+                            self._catchup_on_open = True   # take any standing setup that formed while closed
                             self._set_alert("Market open — strategy resumed.", "info")
                         await self._next_price()        # auto-reconnects if the session dropped
                         if not self.broker.connected:
@@ -2014,6 +2020,15 @@ class TradingEngine:
                             # never stacks a new short on top of it. Runs AFTER brick building
                             # and is fully self-guarded so it can never block the strategy.
                             await self._market_open_reconcile()
+                            # Catch a STANDING entry setup that was built by a history warm-up
+                            # (session open or contract roll) — a warm-up never places orders, so
+                            # without this a valid 2-brick + ER entry that already exists at the
+                            # open would be missed until the next live brick. Runs once, only when
+                            # flat, connected, not blocked, and with no untracked position to adopt.
+                            if self._catchup_on_open and self.broker.connected:
+                                self._catchup_on_open = False
+                                if self.pending_adoption is None:
+                                    await self._maybe_enter_on_start()
                             # Retry a failed EXIT — THROTTLED (>= EXIT_RETRY_MIN_GAP apart)
                             # and CAPPED (MAX_EXIT_RETRIES) so a persistent broker rejection
                             # can't hammer the API once per tick. After the cap, halt and hold.

@@ -385,3 +385,20 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Verified: gate logic unit-tested (runs Mon 09:10; idempotent on 2nd call; skips 10:00 and
     Saturday); backend imports OK; live backend healthy; preview stays stopped/disconnected.
     REQUIRES REDEPLOY + bot left running for production to auto-arm before open.
+
+- 2026-08-25 — BUG FIX (real-money): missed LONG entry after contract roll / at session open:
+  * Symptom: production flat with 3 green bricks + ER 0.231 (>=0.20 thr), yet no LONG placed.
+  * Root cause: live entries fire ONLY inside _process_brick (on a NEW live brick during market
+    hours) or on a MANUAL Start (_maybe_enter_on_start). The 3 greens were rebuilt by a HISTORY
+    WARM-UP (contract rolled to NIFTY29SEP26FUT + pre-open warm-up) — a warm-up never places
+    orders — and there was NO logic to take a STANDING setup at session open. So a valid entry that
+    already exists when the session opens (or right after a roll) sat unfilled until the next brick.
+  * Fix (engine.py): armed a one-time catch-up:
+    - New flag self._catchup_on_open. Set True on the market-open transition (mkt_paused->open) and
+      at the end of _autoload_after_roll() when flat & market open.
+    - In the live loop, AFTER _market_open_reconcile(), if _catchup_on_open & connected & no
+      pending_adoption, consume the flag and run _maybe_enter_on_start() (replays bricks; enters a
+      standing setup at market, respecting the ER chop filter and entry blocks). Runs once.
+  * Verified on the ACTUAL production bricks: _replay_position=('LONG',3), _chop_ok=(True,0.231),
+    entries_blocked=False -> _maybe_enter_on_start places BUY ENTRY @24450 (was MISSED before).
+    31/31 strategy tests pass; backend healthy. REQUIRES REDEPLOY; takes effect at next 09:15 open.
