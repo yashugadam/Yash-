@@ -230,22 +230,23 @@ class TradingEngine:
                 "symbol": self.broker.fut_symbol}
 
     async def _load_history_warmup(self):
-        """Load enough real history for the CURRENT contract to fully warm up the ER window
-        (chop_lookback + buffer bricks). NIFTY prints only ~4 bricks/day at 50-pt, so a fresh
-        month contract needs a generous span; we widen the window until we have enough bricks
-        (capped at 70 days). Called after an expiry roll or a manual contract change so the chop
-        filter is live immediately instead of blocking every entry for days while it warms up."""
-        target = int(self.settings.get("chop_lookback", 50) or 50) + 5
+        """Load real history for the CURRENT contract — enough to both (a) fully warm up the ER
+        window (chop_lookback + buffer) AND (b) render a rich multi-week Renko chart that mirrors
+        what a broker/TradingView Renko shows (not just the last few bricks). NIFTY prints only
+        ~2-4 bricks/day at 50-pt, so we widen the span until we have a good depth of bricks
+        (capped at 70 days). Called after an expiry roll or a manual contract change."""
+        target = max(int(self.settings.get("chop_lookback", 50) or 50) + 5, 150)
         res = {}
-        for days in (25, 45, 70):
+        for days in (30, 50, 70):
             res = await self.load_history(days=days)
             if not res.get("ok"):
                 return res
             if len(self.bricks) >= target:
                 break
-        if len(self.bricks) < target:
+        er_min = int(self.settings.get("chop_lookback", 50) or 50) + 5
+        if len(self.bricks) < er_min:
             self._set_alert(f"New contract warm-up: only {len(self.bricks)} bricks in 70d history "
-                            f"(ER needs {target}). Chop filter will finish warming up as live "
+                            f"(ER needs {er_min}). Chop filter will finish warming up as live "
                             f"bricks form.", "warning")
         return res
 

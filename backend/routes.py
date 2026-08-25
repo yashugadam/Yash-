@@ -211,7 +211,7 @@ async def angel_disconnect():
 @api_router.post("/angel/load-history")
 async def angel_load_history(body: dict = None):
     body = body or {}
-    days = max(1, min(int(body.get("days", 5)), 70))
+    days = max(1, min(int(body.get("days", 60)), 70))
     return await _relay("load_history", {"days": days, "from_date": body.get("from_date")}, timeout=45.0)
 
 

@@ -402,3 +402,18 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Verified on the ACTUAL production bricks: _replay_position=('LONG',3), _chop_ok=(True,0.231),
     entries_blocked=False -> _maybe_enter_on_start places BUY ENTRY @24450 (was MISSED before).
     31/31 strategy tests pass; backend healthy. REQUIRES REDEPLOY; takes effect at next 09:15 open.
+
+- 2026-08-25 — CHART PARITY: our Renko looked "different" from Angel/TradingView Renko:
+  * User compared our chart vs Angel TradingView "Renko Traditional 50pt" on NIFTY 29 SEP 2026.
+    Where the two OVERLAP they match (same decline to ~24,250 + recovery to 24,450) — strategy/brick
+    construction is correct. The only real difference: our chart showed only ~18 bricks starting near
+    the peak, while Angel showed the full multi-week series incl. the early-Aug run-up to ~24,800.
+  * Root cause: _load_history_warmup loaded only just enough history to arm the ER window (~25
+    bricks) then stopped -> truncated chart missing earlier bricks.
+  * Fix: warm-up now targets a rich depth (max(chop_lookback+5, 150) bricks, escalating 30/50/70
+    days, 70d cap) so the chart mirrors a broker/TradingView Renko. Manual "History" button default
+    raised 5d -> 60d so the user can refresh to full depth on demand.
+  * Cosmetic/robustness only — does NOT change strategy decisions (ER uses last 20 bricks; final
+    consec run unchanged). Verified: imports OK, 31/31 strategy tests pass, backend healthy.
+    Could not live-verify vs the SEP future (temp candle cache cleared on pod recycle; connecting
+    preview would risk production's single Angel session). REQUIRES REDEPLOY.
