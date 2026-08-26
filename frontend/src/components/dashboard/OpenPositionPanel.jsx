@@ -34,7 +34,7 @@ export function OpenPositionPanel({ pos, state, m, squareOff }) {
             ) : (
               <div className="text-center py-6" data-testid="no-position">
                 <p className="font-mono text-xs uppercase tracking-widest text-slate-400">Flat — no position</p>
-                <p className="font-mono text-[11px] text-slate-300 mt-1">{state.pending_entry ? "Entry order placing…" : state.expiry.entries_blocked ? "Entries blocked (expiry square-off window)" : "Waiting for 2 red (short) or 2 green (long) bricks"}</p>
+                <p className="font-mono text-[11px] text-slate-300 mt-1">{state.pending_entry ? "Entry order placing…" : state.expiry.entries_blocked ? "Entries blocked (expiry square-off window)" : `Waiting for ${state.settings.entry_bricks} red (short) or ${state.settings.entry_bricks} green (long) brick${state.settings.entry_bricks > 1 ? "s" : ""}`}</p>
               </div>
             )}
           </Widget>

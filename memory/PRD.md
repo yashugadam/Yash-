@@ -430,3 +430,9 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     persisted in DB, survives restarts via _load_state merge).
   * Rationale: 2-brick entry enters late (misses first leg); 1-brick enters at the start of an
     ER-confirmed move, capturing more trend while ER still screens the chop -> more profit + lower DD.
+
+- 2026-08-26 — UI FIX: hardcoded "Waiting for 2 red/2 green bricks" label:
+  * Backend entry_bricks was correctly 1, but OpenPositionPanel.jsx + DashboardDialogs.jsx had the
+    brick count hardcoded to "2" -> misleading (user thought entry was still 2-brick).
+  * Made both dynamic (reads state.settings.entry_bricks, with singular/plural). Verified on preview:
+    shows "Waiting for 1 red (short) or 1 green (long) brick". Frontend change -> REQUIRES REDEPLOY.
