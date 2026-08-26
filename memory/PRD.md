@@ -417,3 +417,16 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     consec run unchanged). Verified: imports OK, 31/31 strategy tests pass, backend healthy.
     Could not live-verify vs the SEP future (temp candle cache cleared on pod recycle; connecting
     preview would risk production's single Angel session). REQUIRES REDEPLOY.
+
+- 2026-08-26 — STRATEGY TUNE (data-backed, LIVE): entry_bricks 2 -> 1 (ER threshold unchanged 0.20).
+  * Backtests (real engine _simulate): 1-year NIFTY index (92,463 candles) AND real NIFTY29SEP26FUT
+    future (~57 days) BOTH show 1-brick@ER0.20 beats current 2-brick@ER0.20:
+      - index: net 650,250 vs 569,750 (+14%), win 48.3% vs 44%, PF 2.98 vs 2.68, DD -28,750 vs -41,750.
+      - future: net 83,750 vs 74,500 (+12%), PF 2.63 vs 2.37, DD -14,500 vs -19,750.
+    Lower thresholds (0.15/0.10) add profit but grow future drawdown -> kept 0.20 for risk control.
+  * Applied at RUNTIME via POST /api/settings {entry_bricks:1} on PRODUCTION while FLAT (position None,
+    no pending). Verified live: entry_bricks=1, chop_threshold=0.2, chop_filter=True. Preview aligned too.
+  * Exit logic UNCHANGED (first opposite brick). No code change / no redeploy needed (runtime setting,
+    persisted in DB, survives restarts via _load_state merge).
+  * Rationale: 2-brick entry enters late (misses first leg); 1-brick enters at the start of an
+    ER-confirmed move, capturing more trend while ER still screens the chop -> more profit + lower DD.
