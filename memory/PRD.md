@@ -431,6 +431,16 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Rationale: 2-brick entry enters late (misses first leg); 1-brick enters at the start of an
     ER-confirmed move, capturing more trend while ER still screens the chop -> more profit + lower DD.
 
+- 2026-09-07 — STRATEGY TUNE (user request, LIVE): entry_bricks 1 -> 2 (ER threshold unchanged 0.20).
+  * User asked to revert entries back to 2 bricks (more conservative / fewer whipsaws).
+  * Applied at RUNTIME via POST /api/settings {entry_bricks:2} on BOTH production and preview.
+    Verified live via /api/state: entry_bricks=2, chop_threshold=0.2, chop_filter=True.
+  * SAFETY: change applied while an open SHORT (65 @ 23933.2) was live on production. Exit logic
+    (_process_brick 772-784) exits on 1st opposite brick and does NOT read entry_bricks, so the
+    open short's exit was unaffected. entry_bricks only gates new flat entries + gap-flip re-entry
+    (now needs 2 opposite bricks instead of 1). No code change / no redeploy (runtime setting,
+    persisted in DB, survives restarts via _load_state merge).
+
 - 2026-08-26 — UI FIX: hardcoded "Waiting for 2 red/2 green bricks" label:
   * Backend entry_bricks was correctly 1, but OpenPositionPanel.jsx + DashboardDialogs.jsx had the
     brick count hardcoded to "2" -> misleading (user thought entry was still 2-brick).
