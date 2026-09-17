@@ -290,7 +290,11 @@ class TradingEngine:
                     count = abs(n) - 1; state["v"] += s * size
                 for _ in range(count):
                     c2 = state["v"] + s * size; state["v"] = c2; state["d"] = s
-                    out.append({"color": "green" if s > 0 else "red", "close": round(c2, 2), "time": ts})
+                    # "close" = Renko grid level (drives brick/ER/direction logic). "actual" =
+                    # the real candle price that produced this brick — used as the realistic FILL
+                    # price so a trade can't fill at a grid level the market gapped straight through.
+                    out.append({"color": "green" if s > 0 else "red", "close": round(c2, 2),
+                                "actual": round(price, 2), "time": ts})
                 return out
             return _b
 
@@ -331,6 +335,7 @@ class TradingEngine:
             price = float(c[4])
             for b in micro(price, c[0]):
                 close = b["close"]
+                fill = b.get("actual", close)   # realistic fill price (never a gapped-through grid level)
                 if trend_ema:
                     ema = close if ema is None else ema + alpha * (close - ema)
                 if b["color"] == "red":
@@ -354,11 +359,11 @@ class TradingEngine:
                             if er is not None and er >= exit_thr and aligned:
                                 do_exit = False       # strong aligned trend → ignore this brick
                         if do_exit:
-                            pts = (position["entry"] - close) if is_short else (close - position["entry"])
+                            pts = (position["entry"] - fill) if is_short else (fill - position["entry"])
                             pnl = pts * lot - cost_per_trade
                             equity += pnl; peak = max(peak, equity); max_dd = min(max_dd, equity - peak)
                             trades.append({"side": position["side"], "entry_time": position["entry_time"],
-                                           "exit_time": b["time"], "entry": position["entry"], "exit": close,
+                                           "exit_time": b["time"], "entry": position["entry"], "exit": fill,
                                            "points": round(pts, 2), "pnl": round(pnl, 2),
                                            "equity": round(equity, 2)})
                             if pnl >= 0:
@@ -397,9 +402,9 @@ class TradingEngine:
                                     if er_rising and len(er_hist) >= rise_gap and er <= er_hist[-rise_gap]:
                                         long_ok = short_ok = False
                     if b["color"] == "red" and consec_red >= entry_bricks and short_ok:
-                        position = {"side": "SHORT", "entry": close, "entry_time": b["time"]}
+                        position = {"side": "SHORT", "entry": fill, "entry_time": b["time"]}
                     elif b["color"] == "green" and consec_green >= entry_bricks and long_ok:
-                        position = {"side": "LONG", "entry": close, "entry_time": b["time"]}
+                        position = {"side": "LONG", "entry": fill, "entry_time": b["time"]}
 
                 if track_hist:
                     hist.append(close)
