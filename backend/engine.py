@@ -258,7 +258,8 @@ class TradingEngine:
                   lookback=0, range_breakout=False, chop_filter=False,
                   chop_thr=0.3, structure=False, exit_chop=False, exit_thr=0.30,
                   er_adaptive=False, adapt_window=120, adapt_pct=70,
-                  er_rising=False, rise_gap=3):
+                  er_rising=False, rise_gap=3,
+                  dir_soft=False, dir_thr=0.3):
         """Replay candle closes through the CURRENT live Renko strategy (symmetric long+short:
         enter on `entry_bricks` consecutive same-colour bricks, exit on `exit_bricks` opposite
         bricks, then flip). `cost_per_trade` = round-trip cost subtracted per trade (NET P&L).
@@ -306,7 +307,7 @@ class TradingEngine:
         equity = peak = 0.0; max_dd = 0.0; wins = 0; gross_win = gross_loss = 0.0
         ema = None; alpha = (2.0 / (trend_ema + 1)) if trend_ema else 0.0
         lb = max(0, int(lookback or 0))
-        pa_on = lb > 0 and (range_breakout or chop_filter or structure or er_adaptive or er_rising)
+        pa_on = lb > 0 and (range_breakout or chop_filter or structure or er_adaptive or er_rising or dir_soft)
         track_hist = lb > 0 and (pa_on or exit_chop)
         hist = []                       # rolling brick closes (prior to the current brick)
         er_hist = []                    # rolling ER values (for the adaptive/regime threshold)
@@ -388,6 +389,18 @@ class TradingEngine:
                             if structure:
                                 long_ok = long_ok and close > win[0]
                                 short_ok = short_ok and close < win[0]
+                            if dir_soft:
+                                # SOFT directional veto: block a trade only when the signed ER
+                                # (net direction × strength over the window) is STRONGLY against
+                                # it (>= dir_thr). Mild/early counter-moves are still allowed, so
+                                # big early-trend entries are kept while the worst counter-trend
+                                # entries (strong opposing trend) are vetoed.
+                                er_s, nd_s = _er_dir(close)
+                                if er_s is not None and er_s >= dir_thr:
+                                    if nd_s < 0:
+                                        long_ok = False
+                                    elif nd_s > 0:
+                                        short_ok = False
                             if chop_filter or er_adaptive or er_rising:
                                 er, _ = _er_dir(close)
                                 if er is None:
