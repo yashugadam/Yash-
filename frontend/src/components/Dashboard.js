@@ -185,6 +185,8 @@ export default function Dashboard({ onLogout }) {
       entry_bricks: Number(form.entry_bricks) || 2,
       chop_lookback: Number(form.chop_lookback) || 50,
       chop_threshold: Number(form.chop_threshold),
+      dir_soft: !!form.dir_soft,
+      dir_threshold: Number(form.dir_threshold) || 0.30,
       rollover_position: !!form.rollover_position,
     });
     toast.success("Strategy parameters updated");

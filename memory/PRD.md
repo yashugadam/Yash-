@@ -441,6 +441,32 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     (now needs 2 opposite bricks instead of 1). No code change / no redeploy (runtime setting,
     persisted in DB, survives restarts via _load_state merge).
 
+- 2026-09-17 — STRATEGY FEATURE (user request): SOFT DIRECTIONAL FILTER (dir_soft / dir_threshold),
+  default ON at X=0.3. Requires DEPLOY to take effect on production (live-engine code change).
+  * WHY: user identified the ER chop filter is direction-BLIND (uses |greens-reds|), so after a strong
+    trend a 2-brick pullback still passed ER and the bot entered COUNTER-TREND (e.g. shorting into a
+    strong uptrend) -> whipsaw losses (04-Aug -14.5k short into uptrend; 11-Sep & 17-Sep longs into downtrend).
+  * FIX: _signed_er() = (last-first)/path over chop_lookback window (-1..+1). _dir_ok(side) vetoes an
+    entry ONLY when signed ER is STRONGLY against it (>= dir_threshold): block LONG if signed<=-X, block
+    SHORT if signed>=+X. Mild/early reversals still allowed (keeps big early-trend entries). Applied to
+    ALL 3 live entry paths: _process_brick, GAP_FLIP re-entry, _maybe_enter_on_start. NOT applied to
+    RECONCILE_REENTRY / EXPIRY_ROLLOVER (they re-adopt an existing position).
+  * BACKTEST FILL-REALISM FIX (backtest-only): _simulate now fills at the actual candle price ("actual"),
+    not the Renko GRID close, so a trade can't fill at a level the market gapped THROUGH. User caught a
+    phantom 7-Sep short at 24,250 (market was ~23,930); after fix it fills at 23,942 -> +31,462, matching
+    the REAL production +31,018 trade.
+  * HONEST BACKTEST (corrected fills, real NIFTY29SEP26FUT candles cached at /app/memory/candles_cache.json):
+    60d CURRENT -11,226 (30.8% win, PF0.83, DD-45k) vs soft X=0.3 +13,918 (40%, DD-34k);
+    70d CURRENT +26,196 (PF1.4) vs soft X=0.3 +38,952 (45.5%, PF2.07, DD-34k). X=0.3 = robust across both,
+    keeps trend upside, ~25% lower DD, not overfit. Small sample (8-14 trades) caveat given to user.
+  * FILES: backend/engine.py (_signed_er, _dir_ok, 3 entry gates, settings dir_soft/dir_threshold, snapshot
+    signed_er/dir_soft/dir_threshold, _simulate "actual" fill + dir_soft/dir_thr params + variant runner);
+    backend/routes.py (SettingsUpdate dir_soft/dir_threshold); frontend Dashboard.js (saveSettings payload);
+    StrategySettingsPanel.jsx (Directional Filter toggle + Strength X + signed-ER indicator). Tests +8 -> 39 pass.
+  * TODO USER: DEPLOY -> Deploy Now to activate on production. Toggle OFF from dashboard anytime to revert.
+  * Utility backend/pull_candles.py: one-time standalone Angel history pull (REST only, no websocket),
+    reads creds from .env, caches candles to /app/memory for local sims (avoids reconnecting the live session).
+
 - 2026-08-26 — UI FIX: hardcoded "Waiting for 2 red/2 green bricks" label:
   * Backend entry_bricks was correctly 1, but OpenPositionPanel.jsx + DashboardDialogs.jsx had the
     brick count hardcoded to "2" -> misleading (user thought entry was still 2-brick).

@@ -26,6 +26,8 @@ class TradingEngine:
             "chop_filter": True,           # ER (efficiency-ratio) entry filter — block entries in chop
             "chop_lookback": 50,           # bricks in the ER window
             "chop_threshold": 0.30,        # min ER (net move / total path) to allow an entry
+            "dir_soft": True,              # SOFT directional gate: veto entries against a STRONG trend
+            "dir_threshold": 0.30,         # signed-ER strength (0..1) at which the opposing trend vetoes an entry
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
@@ -528,7 +530,9 @@ class TradingEngine:
                                       int(v.get("adapt_window", 120)),
                                       float(v.get("adapt_pct", 70)),
                                       bool(v.get("er_rising", False)),
-                                      int(v.get("rise_gap", 3)))
+                                      int(v.get("rise_gap", 3)),
+                                      bool(v.get("dir_soft", False)),
+                                      float(v.get("dir_thr", 0.3)))
                 s["label"] = v.get("label") or (f"bs{s['brick_size']} e{s['entry_bricks']}"
                                                  f"/x{s['exit_bricks']}" + (f" ema{s['trend_ema']}" if s['trend_ema'] else ""))
                 if v.get("include_trades"):
@@ -723,6 +727,36 @@ class TradingEngine:
         thr = max(0.05, float(self.settings.get("chop_threshold", 0.30) or 0.30))
         return er >= thr, round(er, 3)
 
+    def _signed_er(self):
+        """Signed efficiency ratio over the ER window: (last-first)/path, range -1..+1.
+        Positive => window trends UP, negative => DOWN, magnitude => how efficient/strong.
+        Returns None if not enough brick history yet."""
+        lb = max(2, int(self.settings.get("chop_lookback", 50) or 50))
+        closes = [b["close"] for b in self.bricks[-(lb + 1):]]
+        if len(closes) < lb + 1:
+            return None
+        path = sum(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+        if not path:
+            return 0.0
+        return (closes[-1] - closes[0]) / path
+
+    def _dir_ok(self, side):
+        """SOFT directional gate. Veto a new entry ONLY when the signed ER is STRONGLY against
+        it (>= dir_threshold): block LONGs in a strong downtrend, block SHORTs in a strong
+        uptrend. Mild pullbacks / early reversals are still allowed, so big early-trend entries
+        are kept. Returns True (allow) when the gate is off or history is insufficient."""
+        if not self.settings.get("dir_soft"):
+            return True
+        signed = self._signed_er()
+        if signed is None:
+            return True
+        thr = float(self.settings.get("dir_threshold", 0.30) or 0.30)
+        if side == "LONG" and signed <= -thr:
+            return False
+        if side == "SHORT" and signed >= thr:
+            return False
+        return True
+
     def er_projection(self, max_bricks=15):
         """Forward projection: from the CURRENT bricks, simulate consecutive same-colour bricks
         (each a fixed brick_size step) on both sides and find the first price at which the ER
@@ -807,13 +841,13 @@ class TradingEngine:
         if not (self.position or self.pending_entry) and not self._entries_blocked():
             need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
             chop_ok, _er = self._chop_ok()
-            if color == "red" and self.consec_red >= need and chop_ok:
+            if color == "red" and self.consec_red >= need and chop_ok and self._dir_ok("SHORT"):
                 self.down_run_reds = self.consec_red
                 self.pending_entry = True
                 self._entry_side = "SHORT"
                 brick["signal"] = "SHORT"
                 asyncio.create_task(self._execute_order("SELL", "ENTRY", self.price, brick["index"]))
-            elif color == "green" and self.consec_green >= need and chop_ok:
+            elif color == "green" and self.consec_green >= need and chop_ok and self._dir_ok("LONG"):
                 self.down_run_reds = self.consec_green
                 self.pending_entry = True
                 self._entry_side = "LONG"
@@ -953,11 +987,11 @@ class TradingEngine:
                         and not self.pending_entry and not self._entries_blocked() \
                         and self._chop_ok()[0]:
                     need = max(1, int(self.settings.get("entry_bricks", 2) or 2))
-                    if self.consec_red >= need:
+                    if self.consec_red >= need and self._dir_ok("SHORT"):
                         self._entry_side, flip_side = "SHORT", "SELL"
                         self.down_run_reds = self.consec_red
                         self.pending_entry = True
-                    elif self.consec_green >= need:
+                    elif self.consec_green >= need and self._dir_ok("LONG"):
                         self._entry_side, flip_side = "LONG", "BUY"
                         self.down_run_reds = self.consec_green
                         self.pending_entry = True
@@ -1220,6 +1254,10 @@ class TradingEngine:
             return
         # respect the ER chop filter on start too — don't enter mid-trend during chop
         if not self._chop_ok()[0]:
+            self.consec_red = cr; self.consec_green = cg
+            return
+        # soft directional gate: don't start an entry that fights a strong opposing trend
+        if not self._dir_ok(side):
             self.consec_red = cr; self.consec_green = cg
             return
         self.down_run_reds = run
@@ -2167,6 +2205,9 @@ class TradingEngine:
             "chop_filter": bool(self.settings.get("chop_filter")),
             "chop_er": self._chop_ok()[1],
             "chop_threshold": float(self.settings.get("chop_threshold", 0.30) or 0.30),
+            "dir_soft": bool(self.settings.get("dir_soft")),
+            "dir_threshold": float(self.settings.get("dir_threshold", 0.30) or 0.30),
+            "signed_er": (round(s, 3) if (s := self._signed_er()) is not None else None),
             "entry_bricks": int(self.settings.get("entry_bricks", 2) or 2),
             "er_projection": self.er_projection(),
             "ticks_in_bar": self.ticks_in_bar,

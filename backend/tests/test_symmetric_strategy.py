@@ -579,3 +579,100 @@ def test_entry_bricks_setting_requires_three():
         calls = await _feed(eng, ["red", "red", "red"])
         assert calls == [("SELL", "ENTRY")]
     asyncio.run(scenario())
+
+
+
+# ---------------------------------------------------------------- soft directional gate
+def _set_hist(eng, steps, start=24000.0, lb=20):
+    """Populate eng.bricks with lb+1 closes from a list of +1/-1 (x brick_size) steps so
+    _signed_er() = sum(steps)/len(steps)."""
+    eng.settings["chop_lookback"] = lb
+    closes = [start]
+    for s in steps:
+        closes.append(round(closes[-1] + s * 50, 2))
+    eng.bricks = [{"index": i, "color": "green", "open": 0.0, "close": c, "time": "t", "signal": None}
+                  for i, c in enumerate(closes)]
+
+
+def test_signed_er_value():
+    eng = _fresh()
+    _set_hist(eng, [1] * 16 + [-1] * 4)          # net +12 over 20 steps
+    assert eng._signed_er() == pytest.approx(0.6, abs=1e-6)
+    _set_hist(eng, [-1] * 16 + [1] * 4)          # net -12
+    assert eng._signed_er() == pytest.approx(-0.6, abs=1e-6)
+
+
+def test_signed_er_none_without_history():
+    eng = _fresh()
+    eng.settings["chop_lookback"] = 20
+    eng.bricks = []
+    assert eng._signed_er() is None
+    assert eng._dir_ok("SHORT") is True          # no history -> never veto (chop gate handles it)
+
+
+def test_dir_gate_vetoes_short_in_strong_uptrend():
+    """Strong uptrend (signed ER +0.6 >= 0.3): a SHORT entry must be BLOCKED even after 2 reds."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = True
+        eng.settings["dir_threshold"] = 0.3
+        _set_hist(eng, [1] * 16 + [-1] * 4)
+        calls = await _feed(eng, ["red", "red"])
+        assert calls == []
+    asyncio.run(scenario())
+
+
+def test_dir_gate_allows_long_in_strong_uptrend():
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = True
+        eng.settings["dir_threshold"] = 0.3
+        _set_hist(eng, [1] * 16 + [-1] * 4)
+        calls = await _feed(eng, ["green", "green"])
+        assert calls == [("BUY", "ENTRY")]
+    asyncio.run(scenario())
+
+
+def test_dir_gate_vetoes_long_in_strong_downtrend():
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = True
+        eng.settings["dir_threshold"] = 0.3
+        _set_hist(eng, [-1] * 16 + [1] * 4)
+        calls = await _feed(eng, ["green", "green"])
+        assert calls == []
+    asyncio.run(scenario())
+
+
+def test_dir_gate_allows_short_in_strong_downtrend():
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = True
+        eng.settings["dir_threshold"] = 0.3
+        _set_hist(eng, [-1] * 16 + [1] * 4)
+        calls = await _feed(eng, ["red", "red"])
+        assert calls == [("SELL", "ENTRY")]
+    asyncio.run(scenario())
+
+
+def test_dir_gate_allows_entry_in_mild_trend():
+    """Signed ER +0.1 (< 0.3 threshold): a mild opposing lean must NOT veto — keeps early entries."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = True
+        eng.settings["dir_threshold"] = 0.3
+        _set_hist(eng, [1] * 11 + [-1] * 9)      # net +2 over 20 => signed 0.1
+        calls = await _feed(eng, ["red", "red"])
+        assert calls == [("SELL", "ENTRY")]      # short allowed despite mild uptrend
+    asyncio.run(scenario())
+
+
+def test_dir_gate_off_allows_counter_trend():
+    """dir_soft=False -> the gate is disabled, counter-trend entry goes through."""
+    async def scenario():
+        eng = _fresh()
+        eng.settings["dir_soft"] = False
+        _set_hist(eng, [1] * 16 + [-1] * 4)      # strong uptrend
+        calls = await _feed(eng, ["red", "red"])
+        assert calls == [("SELL", "ENTRY")]
+    asyncio.run(scenario())
