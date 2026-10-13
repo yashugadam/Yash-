@@ -486,19 +486,17 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     block, _live_fill margin-break x2, settings.margin_fraction). Tests: +7 -> 46 pass.
   * TODO USER: DEPLOY to activate on production. Keep PREVIEW fully stopped/disconnected (shared Angel login).
   * NOT done this round (deferred): durable order journal / orphan-fill recovery, hard single-session lock.
-  * HALT ADDED (same request, 2026-10-13): pause + alert on bot/broker disagreement.
-    - engine: self.trading_halted/halt_reason; _halt()/_clear_halt(); guard at top of _execute_order
-      suppresses ALL strategy orders while halted (bypass only for EXPIRY_SQUAREOFF/CIRCUIT_BREAKER/
-      MANUAL_SQUAREOFF/RECONCILE_REEXIT/RECONCILE_REENTRY); _entries_blocked() includes trading_halted;
-      _halt set on the two mismatch cases (ENTRY untracked broker position, EXIT side mismatch);
-      persisted in state + exposed in snapshot. reconcile_resolve() clears the halt (user resolving).
-      New "resume" command + POST /api/bot/resume to clear halt manually.
-    - frontend: red HALT banner (data-testid=halt-banner) + "Resume trading" button (resume-trading-button)
-      in Dashboard.js (POST /bot/resume). Tests: +5 halt tests -> 51 pass total.
+  * HALT FEATURE REMOVED (2026-10-13, user request): the earlier "pause + alert and wait for human to
+    resume" halt was REMOVED — user is in US/asleep during IST market hours, so a bot that pauses and
+    waits is harmful (a position could sit stuck). Reverted: trading_halted/halt_reason flags, _halt()/
+    _clear_halt(), the _execute_order halt guard, _entries_blocked halt term, persist/load/snapshot of
+    halt, reconcile_resolve _clear_halt, the "resume" command, POST /api/bot/resume, and the frontend
+    halt banner + Resume button. KEPT (autonomous, non-blocking): reconcile-before-order (sizes exits to
+    broker, blocks stacking entries) + pre-trade margin skip + no rejected-order hammering. On a mismatch
+    the bot now just logs + alerts and KEEPS RUNNING (never pauses). Tests back to 46 pass.
   * ROOT CAUSE CONFIRMED: PREVIEW env has been trading the SAME Angel account as production (preview's own
     order log shows SELL ENTRY @22293 08-Oct + BUY EXIT REJECTED insufficient-funds 13-Oct + stale SHORT
     65@22293). Two environments on one Angel login => each sees the other's lots as untracked => desync.
-    MITIGATED now: reconcile+halt makes BOTH envs pause on mismatch instead of firing wrong orders.
     STILL NEEDED to fully prevent: keep PREVIEW permanently stopped/disconnected, or build the hard
     single-session lock (deferred). Preview is currently disconnected/idle.
 
