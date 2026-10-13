@@ -784,3 +784,57 @@ def test_live_fill_stops_hammering_on_margin_reject():
         assert filled is False
         assert order["attempts"] == 1            # broke on the first attempt, no hammering
     asyncio.run(scenario())
+
+
+# ------------------------------------------- trading HALT (pause + alert on bot/broker disagreement)
+def test_halt_set_on_entry_mismatch():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.trading_halted is True
+        assert eng.halt_reason and "untracked" in eng.halt_reason.lower()
+        assert eng._entries_blocked() is True
+    asyncio.run(scenario())
+
+
+def test_halt_set_on_exit_side_mismatch():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 0, "unrealized_pnl": 0.0}
+        await eng._execute_order("SELL", "EXIT", 22000.0, 6)
+        assert eng.trading_halted is True
+    asyncio.run(scenario())
+
+
+def test_halt_suppresses_strategy_orders():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        eng.trading_halted = True
+        eng.halt_reason = "test"
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 7)
+        assert eng.orders == []                       # never created or placed
+        assert eng.pending_entry is False
+        eng.broker.get_net_position.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_halt_bypassed_by_resolution_order():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        eng.trading_halted = True
+        eng.position = {"side": "SHORT", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        await eng._execute_order("BUY", "EXIT", 22000.0, 6, reason="RECONCILE_REEXIT")
+        assert eng.orders and eng.orders[0]["status"] == "SKIPPED_FLAT"  # got past the halt guard
+    asyncio.run(scenario())
+
+
+def test_reconcile_resolve_clears_halt():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        eng.trading_halted = True
+        eng.halt_reason = "x"
+        await eng.reconcile_resolve("accept")
+        assert eng.trading_halted is False
+    asyncio.run(scenario())

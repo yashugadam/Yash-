@@ -164,6 +164,12 @@ async def post_reconcile_resolve(body: dict):
     return await _relay("reconcile_resolve", {"action": (body.get("action") or "").lower()})
 
 
+@api_router.post("/bot/resume")
+async def post_resume():
+    """Clear a trading halt (bot/broker mismatch) so strategy orders can fire again."""
+    return await _relay("resume")
+
+
 @api_router.post("/bot/arm")
 async def arm_breaker():
     return await _relay("arm")

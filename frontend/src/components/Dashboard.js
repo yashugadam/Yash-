@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { toast } from "sonner";
+import { ShieldAlert } from "lucide-react";
 import Backtest from "@/components/Backtest";
 import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { DashboardDialogs } from "@/components/dashboard/DashboardDialogs";
@@ -154,6 +155,17 @@ export default function Dashboard({ onLogout }) {
     await checkReconcile(); poll(); loadTrades();
   };
 
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const resumeTrading = async () => {
+    setResumeBusy(true);
+    try {
+      const { data } = await axios.post(`${API}/bot/resume`);
+      if (data.ok) toast.success(data.message); else toast.error(data.message || "Resume failed");
+    } catch (e) { toast.error("Resume failed"); }
+    setResumeBusy(false);
+    poll();
+  };
+
   const [manualBusy, setManualBusy] = useState(false);
   const manualOrder = async (side) => {
     setManualBusy(true);
@@ -244,6 +256,21 @@ export default function Dashboard({ onLogout }) {
         setShowBacktest={setShowBacktest} onLogout={onLogout} startStop={startStop} />
 
       {showBacktest && <Backtest onClose={() => setShowBacktest(false)} defaultBrick={state?.settings?.brick_size || 50} />}
+
+      {state.trading_halted && (
+        <div data-testid="halt-banner"
+          className="mx-4 mt-4 border-2 border-red-600 bg-red-50 px-4 py-3 flex items-start gap-3">
+          <ShieldAlert className="h-5 w-5 text-red-600 mt-0.5 shrink-0" />
+          <div className="flex-1">
+            <p className="font-mono text-xs font-bold uppercase tracking-wider text-red-700">Trading paused — bot/broker mismatch</p>
+            <p className="font-mono text-[11px] text-red-600 mt-1">{state.halt_reason || "The bot's position disagreed with Angel One."} No new orders will fire until you resolve it below (Broker Reconciliation) or resume.</p>
+          </div>
+          <button onClick={resumeTrading} disabled={resumeBusy} data-testid="resume-trading-button"
+            className="font-mono text-[11px] uppercase tracking-wider bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 disabled:opacity-40 shrink-0">
+            {resumeBusy ? "Resuming…" : "Resume trading"}
+          </button>
+        </div>
+      )}
 
       <DashboardDialogs showStopConfirm={showStopConfirm} setShowStopConfirm={setShowStopConfirm}
         state={state} confirmStop={confirmStop} showStartConfirm={showStartConfirm}

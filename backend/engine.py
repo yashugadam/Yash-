@@ -92,6 +92,8 @@ class TradingEngine:
         # On Start: if Angel One holds a short we didn't open (e.g. a manual trade taken while the
         # bot was off), surface it for the user to ADOPT so the bot manages its exit per strategy.
         self.pending_adoption = None                   # {qty, avgprice, netqty, declined}
+        self.trading_halted = False                    # PAUSE: bot/broker disagreed -> stop firing orders
+        self.halt_reason = None
         self.persist_counter = 0
         # risk: daily max-loss circuit breaker
         self.day_key: Optional[str] = None            # IST date the day P&L belongs to
@@ -892,7 +894,18 @@ class TradingEngine:
     async def _execute_order(self, side, kind, ref_price, brick_index, reason="SIGNAL"):
         # Duplicate-order protection: only one order in-flight; re-validate inside the lock.
         flip_side = None
+        # Strategy orders never fire while trading is HALTED (bot/broker disagreed). Only deliberate
+        # resolution/safety orders (reconcile, expiry square-off, circuit breaker, manual) may run.
+        _halt_bypass = {"EXPIRY_SQUAREOFF", "CIRCUIT_BREAKER", "MANUAL_SQUAREOFF",
+                        "RECONCILE_REEXIT", "RECONCILE_REENTRY"}
         async with self.order_lock:
+            if self.trading_halted and reason not in _halt_bypass:
+                logger.warning("Order suppressed — trading HALTED (%s): %s %s", self.halt_reason, side, kind)
+                if kind == "ENTRY":
+                    self.pending_entry = False
+                else:
+                    self.pending_exit = False
+                return
             if kind == "ENTRY" and self.position is not None:
                 logger.warning("Duplicate ENTRY dropped - position already open")
                 self.pending_entry = False
@@ -966,8 +979,8 @@ class TradingEngine:
                         order["note"] = (f"Entry skipped — Angel One already shows {abs(bqty)} qty "
                                          f"({bside}) that the bot didn't open. Reconcile before trading.")
                         self.pending_entry = False
-                        self._set_alert("Entry BLOCKED — Angel One shows an untracked position. "
-                                        "Open Broker Reconciliation to sync before the bot trades again.", "error")
+                        self._halt(f"Angel One shows an untracked {bside} position ({abs(bqty)} qty) "
+                                   f"the bot didn't open")
                         asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
                         return
                     # pre-trade margin check — skip (don't hammer a rejection) if unaffordable
@@ -999,7 +1012,8 @@ class TradingEngine:
                         order["note"] = (f"Exit BLOCKED — Angel shows {bside} {abs(bqty)} but bot holds "
                                          f"{self.position['side']}. Reconcile before trading.")
                         self.pending_exit = False
-                        self._set_alert("Exit BLOCKED — bot/broker side mismatch. Use Broker Reconciliation.", "error")
+                        self._halt(f"Bot holds {self.position['side']} but Angel shows {bside} "
+                                   f"{abs(bqty)} — position side mismatch")
                         asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
                         return
                     # size the exit to the broker's ACTUAL qty so we never over-/under-exit a phantom size
@@ -1078,6 +1092,20 @@ class TradingEngine:
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
         self._alert_ts = time.time()
         logger.warning("ALERT(%s): %s", level, msg)
+
+    def _halt(self, reason):
+        """PAUSE trading: the bot's internal state disagreed with Angel One. Block all strategy
+        orders + alert until the user resolves via Broker Reconciliation (or Resume)."""
+        self.trading_halted = True
+        self.halt_reason = reason
+        self._set_alert(f"{reason} — trading PAUSED. Resolve in Broker Reconciliation to resume.", "error")
+        logger.warning("TRADING HALTED: %s", reason)
+
+    def _clear_halt(self):
+        if self.trading_halted:
+            logger.warning("TRADING RESUMED (halt cleared): %s", self.halt_reason)
+        self.trading_halted = False
+        self.halt_reason = None
 
     async def _live_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
         """Real Angel One LIMIT order with escalating buffer + re-pricing.
@@ -1166,6 +1194,9 @@ class TradingEngine:
                 "broker_avgprice": np.get("avgprice")}
 
     async def reconcile_resolve(self, action):
+        # The user is deliberately resolving the mismatch -> lift any trading halt so the
+        # resolution order (and subsequent strategy) can run again.
+        self._clear_halt()
         if action == "reenter":
             if not self.position:
                 return {"ok": False, "message": "No bot position to re-enter."}
@@ -1521,7 +1552,8 @@ class TradingEngine:
         # No new entries once we've hit the expiry-day square-off window, the circuit breaker,
         # or while an un-adopted Angel One position is awaiting the user's decision (no stacking).
         _, _, _, is_today, past_cut = self._expiry_status()
-        return bool((is_today and past_cut) or self.breaker_tripped or self.pending_adoption is not None)
+        return bool((is_today and past_cut) or self.breaker_tripped
+                    or self.pending_adoption is not None or self.trading_halted)
 
     # -------- risk: daily max-loss circuit breaker --------
     def _check_circuit_breaker(self):
@@ -1658,6 +1690,8 @@ class TradingEngine:
             "rollover_armed": self._rollover_armed, "rollover_side": self._rollover_side,
             "exit_retry_count": self._exit_retry_count,
             "pending_adoption": self.pending_adoption,
+            "trading_halted": self.trading_halted,
+            "halt_reason": self.halt_reason,
         }
 
     async def _persist_state(self):
@@ -1700,6 +1734,8 @@ class TradingEngine:
         self._rollover_side = doc.get("rollover_side")
         self._exit_retry_count = int(doc.get("exit_retry_count", 0) or 0)
         self.pending_adoption = doc.get("pending_adoption")
+        self.trading_halted = bool(doc.get("trading_halted"))
+        self.halt_reason = doc.get("halt_reason")
         if self.position:
             logger.warning("RECOVERED open position from disk: %s", self.position)
         logger.info("Engine state restored (running=%s, bricks=%d)", self.running, len(self.bricks))
@@ -2034,6 +2070,12 @@ class TradingEngine:
             return await self.reconcile()
         if ctype == "reconcile_resolve":
             return await self.reconcile_resolve((payload.get("action") or "").lower())
+        if ctype == "resume":
+            was = self.trading_halted
+            self._clear_halt()
+            await self._persist_state()
+            return {"ok": True, "resumed": was,
+                    "message": "Trading resumed." if was else "Trading was not halted."}
         if ctype == "manual_order":
             return await self.manual_order((payload.get("side") or "").upper(), payload.get("qty"))
         if ctype == "connect":
@@ -2253,6 +2295,8 @@ class TradingEngine:
             "instance_id": INSTANCE_ID,
             "market_open": self._market_open(),
             "pending_adoption": self.pending_adoption,
+            "trading_halted": self.trading_halted,
+            "halt_reason": self.halt_reason,
             "feed_mode": self.feed_mode,
             "feed_error": self.feed_error,
             "alert": self.alert if (self.alert and time.time() - self._alert_ts < ALERT_TTL_SEC) else None,
