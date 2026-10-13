@@ -44,6 +44,7 @@ class SettingsUpdate(BaseModel):
     chop_threshold: Optional[float] = Field(None, ge=0.05, le=1)
     dir_soft: Optional[bool] = None
     dir_threshold: Optional[float] = Field(None, ge=0.05, le=1)
+    auto_sync: Optional[bool] = None
     bar_seconds: Optional[int] = Field(None, ge=1, le=3600)
     lot_size: Optional[int] = Field(None, ge=1, le=MAX_ORDER_QTY)
     buffer_points: Optional[float] = Field(None, ge=0, le=2000)

@@ -69,6 +69,15 @@ export function StrategySettingsPanel({ form, state, setForm, saveSettings }) {
               </div>
 
               <div className="mt-3 border-t border-slate-100 pt-3">
+                <label className="flex items-center justify-between gap-2 cursor-pointer select-none" data-testid="auto-sync-label">
+                  <span className="font-mono text-[10px] uppercase text-slate-500">Auto-sync on mismatch<br /><span className="text-slate-400 normal-case">if the bot and Angel disagree, adopt Angel's real position automatically (self-heals while you're away)</span></span>
+                  <input type="checkbox" checked={form.auto_sync !== false} disabled={state.running}
+                    onChange={(e) => setForm({ ...form, auto_sync: e.target.checked })}
+                    className="h-4 w-4 accent-slate-900 disabled:opacity-40" data-testid="setting-auto_sync" />
+                </label>
+              </div>
+
+              <div className="mt-3 border-t border-slate-100 pt-3">
                 <label className="flex items-center justify-between gap-2 cursor-pointer select-none" data-testid="dir-soft-label">
                   <span className="font-mono text-[10px] uppercase text-slate-500">Directional filter<br /><span className="text-slate-400 normal-case">don't trade against a strong trend (block shorts in strong uptrend / longs in strong downtrend)</span></span>
                   <input type="checkbox" checked={!!form.dir_soft} disabled={state.running}

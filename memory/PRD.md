@@ -499,6 +499,18 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     65@22293). Two environments on one Angel login => each sees the other's lots as untracked => desync.
     STILL NEEDED to fully prevent: keep PREVIEW permanently stopped/disconnected, or build the hard
     single-session lock (deferred). Preview is currently disconnected/idle.
+  * AUTO-SYNC ON MISMATCH (2026-10-13, user request — sleep-friendly, replaces the removed halt):
+    new setting auto_sync (default True) + _adopt_broker_position() helper. On a bot/broker mismatch,
+    instead of skipping, the bot AUTO-ADOPTS Angel's real position (side/qty/avgprice) and manages it:
+    - ENTRY where broker already holds a position -> adopt it (AUTO_SYNC_ENTRY), skip the new entry.
+    - EXIT where broker side != bot side -> adopt broker's side (AUTO_SYNC_EXIT), skip the wrong-side exit;
+      next brick re-evaluates with the correct position.
+    Order status logged AUTO_SYNCED + info alert. If auto_sync=False -> falls back to skip + error alert.
+    EXIT size-drift (same side) still auto-resizes to broker qty; EXIT broker-flat still syncs to flat.
+    FILES: engine.py (_adopt_broker_position, auto_sync setting, both mismatch branches), routes.py
+    (SettingsUpdate.auto_sync), Dashboard.js (payload auto_sync), StrategySettingsPanel.jsx (toggle
+    data-testid=setting-auto_sync). Tests: 47 pass (3 new auto-sync). Verified in preview UI + API.
+    TODO USER: DEPLOY to activate on production.
 
 
 - 2026-08-26 — UI FIX: hardcoded "Waiting for 2 red/2 green bricks" label:

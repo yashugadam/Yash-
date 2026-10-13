@@ -29,6 +29,7 @@ class TradingEngine:
             "dir_soft": True,              # SOFT directional gate: veto entries against a STRONG trend
             "dir_threshold": 0.30,         # signed-ER strength (0..1) at which the opposing trend vetoes an entry
             "margin_fraction": 0.25,       # est. margin as fraction of notional, for the pre-trade affordability check
+            "auto_sync": True,             # on a bot/broker mismatch, auto-adopt Angel's real position (self-heal)
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
@@ -962,13 +963,20 @@ class TradingEngine:
                 if kind == "ENTRY":
                     if bqty != 0:
                         bside = "SHORT" if bqty < 0 else "LONG"
-                        order["status"] = "SKIPPED_MISMATCH"
-                        order["note"] = (f"Entry skipped — Angel One already shows {abs(bqty)} qty "
-                                         f"({bside}) that the bot didn't open. Reconcile before trading.")
                         self.pending_entry = False
-                        self._set_alert(f"Entry skipped — Angel One shows an untracked {bside} "
-                                        f"position ({abs(bqty)} qty) the bot didn't open. Use Broker "
-                                        f"Reconciliation to sync.", "error")
+                        if self.settings.get("auto_sync", True):
+                            self._adopt_broker_position(npos, "AUTO_SYNC_ENTRY")
+                            order["status"] = "AUTO_SYNCED"
+                            order["note"] = (f"Entry skipped & AUTO-SYNCED to Angel's real {bside} "
+                                             f"{abs(bqty)} qty @ {npos.get('avgprice')}; bot now manages it.")
+                            self._set_alert(f"Auto-synced to Angel's real {bside} {abs(bqty)} position — "
+                                            f"bot is now managing it (exits on the next opposite brick).", "info")
+                        else:
+                            order["status"] = "SKIPPED_MISMATCH"
+                            order["note"] = (f"Entry skipped — Angel shows untracked {bside} {abs(bqty)}; "
+                                             f"auto-sync off, reconcile manually.")
+                            self._set_alert(f"Entry skipped — untracked {bside} {abs(bqty)} at Angel. "
+                                            f"Use Broker Reconciliation.", "error")
                         asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
                         return
                     # pre-trade margin check — skip (don't hammer a rejection) if unaffordable
@@ -996,12 +1004,21 @@ class TradingEngine:
                         return
                     bside = "SHORT" if bqty < 0 else "LONG"
                     if self.position and bside != self.position["side"]:
-                        order["status"] = "SKIPPED_MISMATCH"
-                        order["note"] = (f"Exit BLOCKED — Angel shows {bside} {abs(bqty)} but bot holds "
-                                         f"{self.position['side']}. Reconcile before trading.")
+                        old_side = self.position["side"]
                         self.pending_exit = False
-                        self._set_alert(f"Exit skipped — bot holds {self.position['side']} but Angel "
-                                        f"shows {bside} {abs(bqty)}. Use Broker Reconciliation to sync.", "error")
+                        if self.settings.get("auto_sync", True):
+                            self._adopt_broker_position(npos, "AUTO_SYNC_EXIT")
+                            order["status"] = "AUTO_SYNCED"
+                            order["note"] = (f"Exit skipped & AUTO-SYNCED: bot thought {old_side} but Angel "
+                                             f"shows {bside} {abs(bqty)}; adopted the real position.")
+                            self._set_alert(f"Auto-synced — bot thought {old_side} but Angel shows "
+                                            f"{bside} {abs(bqty)}; adopted the real position.", "info")
+                        else:
+                            order["status"] = "SKIPPED_MISMATCH"
+                            order["note"] = (f"Exit blocked — Angel shows {bside} {abs(bqty)} but bot holds "
+                                             f"{old_side}; auto-sync off, reconcile manually.")
+                            self._set_alert(f"Exit skipped — side mismatch ({old_side} vs {bside}). "
+                                            f"Use Broker Reconciliation.", "error")
                         asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
                         return
                     # size the exit to the broker's ACTUAL qty so we never over-/under-exit a phantom size
@@ -1080,6 +1097,24 @@ class TradingEngine:
         self.alert = {"id": str(uuid.uuid4()), "msg": msg, "level": level, "time": now_iso()}
         self._alert_ts = time.time()
         logger.warning("ALERT(%s): %s", level, msg)
+
+    def _adopt_broker_position(self, npos, source="AUTO_SYNC"):
+        """Set the bot's position to match Angel's real net position (side/qty/avg) so a desync
+        self-heals autonomously — the bot then manages the real position per strategy."""
+        bqty = int(npos.get("netqty", 0))
+        if bqty == 0:
+            self.position = None
+            return None
+        side = "LONG" if bqty > 0 else "SHORT"
+        self.position = {
+            "side": side, "qty": abs(bqty),
+            "entry_price": npos.get("avgprice") or self.price,
+            "entry_time": now_iso(), "entry_order_id": source,
+            "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
+        }
+        logger.warning("AUTO-SYNC: adopted Angel position %s %d @ %s (%s)",
+                       side, abs(bqty), npos.get("avgprice"), source)
+        return side
 
     async def _live_fill(self, order, side, base, cap, max_attempts, retry_secs, floor, ceil):
         """Real Angel One LIMIT order with escalating buffer + re-pricing.

@@ -187,6 +187,7 @@ export default function Dashboard({ onLogout }) {
       chop_threshold: Number(form.chop_threshold),
       dir_soft: !!form.dir_soft,
       dir_threshold: Number(form.dir_threshold) || 0.30,
+      auto_sync: form.auto_sync !== false,
       rollover_position: !!form.rollover_position,
     });
     toast.success("Strategy parameters updated");

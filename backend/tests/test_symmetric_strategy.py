@@ -704,13 +704,24 @@ def _fill_ok(order, *a, **k):
     return True
 
 
-def test_entry_blocked_when_broker_has_untracked_position():
+def test_entry_auto_syncs_to_untracked_broker_position():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})  # auto_sync default ON
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.orders[0]["status"] == "AUTO_SYNCED"
+        assert eng.position is not None and eng.position["side"] == "SHORT" and eng.position["qty"] == 65
+        assert eng.position["entry_price"] == 22300
+        eng.broker.place_limit_order.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_entry_skips_on_mismatch_when_auto_sync_off():
     async def scenario():
         eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})
+        eng.settings["auto_sync"] = False
         await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
         assert eng.orders[0]["status"] == "SKIPPED_MISMATCH"
-        assert eng.pending_entry is False
-        eng.broker.place_limit_order.assert_not_called()
+        assert eng.position is None
     asyncio.run(scenario())
 
 
@@ -747,15 +758,14 @@ def test_exit_skipped_when_broker_already_flat():
     asyncio.run(scenario())
 
 
-def test_exit_blocked_on_side_mismatch():
+def test_exit_auto_syncs_on_side_mismatch():
     async def scenario():
-        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})  # broker SHORT
-        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0,     # bot thinks LONG
-                        "entry_time": "t", "entry_order_id": "x",
-                        "reds_at_entry": 0, "unrealized_pnl": 0.0}
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})  # broker SHORT, auto_sync ON
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 0, "unrealized_pnl": 0.0}
         await eng._execute_order("SELL", "EXIT", 22000.0, 6)
-        assert eng.orders[0]["status"] == "SKIPPED_MISMATCH"
-        assert eng.position is not None and eng.position["side"] == "LONG"
+        assert eng.orders[0]["status"] == "AUTO_SYNCED"
+        assert eng.position is not None and eng.position["side"] == "SHORT"  # adopted broker side
     asyncio.run(scenario())
 
 
