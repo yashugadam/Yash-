@@ -631,6 +631,31 @@ class AngelBroker:
                     break
         return {"found": False, "error": self.error}
 
+    def get_available_funds(self):
+        """Available cash/margin in the account via RMS limits. Returns {found, available}.
+        Used for a pre-trade margin check so we skip (not hammer) an unaffordable entry.
+        Auto-relogins once on an expired session."""
+        for attempt in range(2):
+            try:
+                res = self.smart.rmsLimit()
+                if res.get("status"):
+                    d = res.get("data") or {}
+                    for k in ("availablecash", "availableintradaypayin", "net", "availablelimitmargin"):
+                        v = d.get(k)
+                        if v not in (None, ""):
+                            try:
+                                return {"found": True, "available": float(v)}
+                            except (TypeError, ValueError):
+                                continue
+                    return {"found": True, "available": 0.0}
+                self.error = str(res.get("message") or res)
+            except Exception as e:
+                self.error = str(e)
+                logger.warning("rmsLimit() failed (attempt %d): %s", attempt + 1, e)
+            if attempt == 0 and not self.relogin():
+                break
+        return {"found": False, "error": self.error}
+
     def logout(self):
         self.stop_feed()
         try:

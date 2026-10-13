@@ -676,3 +676,111 @@ def test_dir_gate_off_allows_counter_trend():
         calls = await _feed(eng, ["red", "red"])
         assert calls == [("SELL", "ENTRY")]
     asyncio.run(scenario())
+
+
+
+# ------------------------------------------- pre-trade reconcile + margin check (real order path)
+from unittest.mock import MagicMock  # noqa: E402
+
+
+def _exec_engine(net_position, funds=None):
+    """Engine wired with a mocked broker so _execute_order's pre-trade reconcile/margin logic
+    runs for real (no network, no orders)."""
+    eng = _fresh()
+    eng.broker = MagicMock()
+    eng.broker.connected = True
+    eng.broker.get_net_position = MagicMock(return_value=net_position)
+    eng.broker.get_available_funds = MagicMock(return_value=funds or {"found": True, "available": 9_000_000})
+    eng.price = 22000.0
+    eng._claim_order_key = AsyncMock(return_value=True)
+    eng._save_order = AsyncMock()
+    eng._persist_state = AsyncMock()
+    eng._save_trade = AsyncMock()
+    return eng
+
+
+def _fill_ok(order, *a, **k):
+    order["fill_price"] = order.get("limit_price") or 22000.0
+    return True
+
+
+def test_entry_blocked_when_broker_has_untracked_position():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.orders[0]["status"] == "SKIPPED_MISMATCH"
+        assert eng.pending_entry is False
+        eng.broker.place_limit_order.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_entry_skipped_on_insufficient_margin():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None},
+                           funds={"found": True, "available": 100_000})  # need ~357,500
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.orders[0]["status"] == "SKIPPED_MARGIN"
+        assert eng.pending_entry is False
+        eng.broker.place_limit_order.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_entry_proceeds_when_flat_and_funded():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        with patch.object(eng, "_live_fill", side_effect=_fill_ok):
+            await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.position is not None and eng.position["side"] == "SHORT"
+        assert eng.orders[0]["status"] == "COMPLETE"
+    asyncio.run(scenario())
+
+
+def test_exit_skipped_when_broker_already_flat():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        eng.position = {"side": "SHORT", "qty": 65, "entry_price": 22400.0,
+                        "entry_time": "t", "entry_order_id": "x",
+                        "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        await eng._execute_order("BUY", "EXIT", 22000.0, 6)
+        assert eng.orders[0]["status"] == "SKIPPED_FLAT"
+        assert eng.position is None
+    asyncio.run(scenario())
+
+
+def test_exit_blocked_on_side_mismatch():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22300})  # broker SHORT
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0,     # bot thinks LONG
+                        "entry_time": "t", "entry_order_id": "x",
+                        "reds_at_entry": 0, "unrealized_pnl": 0.0}
+        await eng._execute_order("SELL", "EXIT", 22000.0, 6)
+        assert eng.orders[0]["status"] == "SKIPPED_MISMATCH"
+        assert eng.position is not None and eng.position["side"] == "LONG"
+    asyncio.run(scenario())
+
+
+def test_exit_size_corrected_to_broker_qty():
+    """Bot thinks it holds 130 but broker really holds 65 -> exit is resized to 65 (no over-exit)."""
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -65, "avgprice": 22400})
+        eng.position = {"side": "SHORT", "qty": 130, "entry_price": 22400.0,
+                        "entry_time": "t", "entry_order_id": "x",
+                        "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        with patch.object(eng, "_live_fill", side_effect=_fill_ok):
+            await eng._execute_order("BUY", "EXIT", 22000.0, 6)
+        assert eng.orders[0]["qty"] == 65
+    asyncio.run(scenario())
+
+
+def test_live_fill_stops_hammering_on_margin_reject():
+    """A margin rejection must break immediately, not retry max_attempts times."""
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 0, "avgprice": None})
+        eng.broker.place_limit_order = MagicMock(
+            return_value={"ok": False, "error": "Your order has been rejected due to Insufficient Funds."})
+        eng._cur_price = AsyncMock(return_value=22000.0)
+        order = {"qty": 65, "attempts": 0, "status": "PENDING", "note": "", "limit_price": None}
+        filled = await eng._live_fill(order, "SELL", 5, 10, 5, 5, 21990, 22010)
+        assert filled is False
+        assert order["attempts"] == 1            # broke on the first attempt, no hammering
+    asyncio.run(scenario())

@@ -28,6 +28,7 @@ class TradingEngine:
             "chop_threshold": 0.30,        # min ER (net move / total path) to allow an entry
             "dir_soft": True,              # SOFT directional gate: veto entries against a STRONG trend
             "dir_threshold": 0.30,         # signed-ER strength (0..1) at which the opposing trend vetoes an entry
+            "margin_fraction": 0.25,       # est. margin as fraction of notional, for the pre-trade affordability check
             "timeframe": "1m",
             "bar_seconds": 60,            # bar length: brick is checked on each bar CLOSE (TradingView style, true 1-min)
             "lot_size": 65,
@@ -951,6 +952,63 @@ class TradingEngine:
                 asyncio.create_task(self._persist_state())
                 return
 
+            # --- PRE-TRADE RECONCILE: verify against Angel's ACTUAL net position before every
+            #     order, so we never trade on a stale internal state (stacking onto an untracked
+            #     lot, exiting a phantom size, or firing a wrong-direction order). On a transient
+            #     position-API failure we fall back to normal behaviour (never freeze the bot). ---
+            npos = await asyncio.to_thread(self.broker.get_net_position)
+            if npos.get("found"):
+                bqty = int(npos.get("netqty", 0))
+                if kind == "ENTRY":
+                    if bqty != 0:
+                        bside = "SHORT" if bqty < 0 else "LONG"
+                        order["status"] = "SKIPPED_MISMATCH"
+                        order["note"] = (f"Entry skipped — Angel One already shows {abs(bqty)} qty "
+                                         f"({bside}) that the bot didn't open. Reconcile before trading.")
+                        self.pending_entry = False
+                        self._set_alert("Entry BLOCKED — Angel One shows an untracked position. "
+                                        "Open Broker Reconciliation to sync before the bot trades again.", "error")
+                        asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
+                        return
+                    # pre-trade margin check — skip (don't hammer a rejection) if unaffordable
+                    funds = await asyncio.to_thread(self.broker.get_available_funds)
+                    if funds.get("found"):
+                        avail = float(funds.get("available") or 0)
+                        frac = float(self.settings.get("margin_fraction", 0.25) or 0.25)
+                        required = ref_price * int(order["qty"]) * frac
+                        if avail < required:
+                            order["status"] = "SKIPPED_MARGIN"
+                            order["note"] = (f"Entry skipped — insufficient margin: need ~Rs{required:,.0f}, "
+                                             f"have Rs{avail:,.0f}.")
+                            self.pending_entry = False
+                            self._set_alert(f"Entry skipped — not enough margin (need ~Rs{required:,.0f}, "
+                                            f"have Rs{avail:,.0f}). Add funds to resume entries.", "error")
+                            asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
+                            return
+                else:  # EXIT
+                    if bqty == 0:
+                        order["status"] = "SKIPPED_FLAT"
+                        order["note"] = "Exit skipped — Angel One shows FLAT (position already closed)."
+                        self.position = None; self.pending_exit = False
+                        self._set_alert("Exit skipped — Angel One is already flat; bot synced to flat.", "info")
+                        asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
+                        return
+                    bside = "SHORT" if bqty < 0 else "LONG"
+                    if self.position and bside != self.position["side"]:
+                        order["status"] = "SKIPPED_MISMATCH"
+                        order["note"] = (f"Exit BLOCKED — Angel shows {bside} {abs(bqty)} but bot holds "
+                                         f"{self.position['side']}. Reconcile before trading.")
+                        self.pending_exit = False
+                        self._set_alert("Exit BLOCKED — bot/broker side mismatch. Use Broker Reconciliation.", "error")
+                        asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
+                        return
+                    # size the exit to the broker's ACTUAL qty so we never over-/under-exit a phantom size
+                    real_qty = max(1, min(abs(bqty), MAX_ORDER_QTY))
+                    if real_qty != int(order["qty"]):
+                        self._set_alert(f"Exit size corrected to Angel's real {real_qty} qty "
+                                        f"(bot thought {order['qty']}).", "info")
+                        order["qty"] = real_qty
+
             # Idempotency: persist a deterministic client order id BEFORE the broker call.
             # If it already exists (a leader-failover race placed it), suppress the duplicate.
             okey = self._order_key(kind, reason, brick_index)
@@ -1041,7 +1099,11 @@ class TradingEngine:
             if broker_id is None:
                 res = await asyncio.to_thread(self.broker.place_limit_order, angel_side, limit, qty)
                 if not res.get("ok"):
-                    order["note"] = f"Broker reject: {safe_err(res.get('error'))}"
+                    err = safe_err(res.get('error')) or ""
+                    order["note"] = f"Broker reject: {err}"
+                    if any(k in str(err).lower() for k in ("insufficient", "margin", "funds")):
+                        order["note"] = f"Broker reject (margin) — not retrying: {err}"
+                        break   # margin won't free up in seconds; stop hammering rejections
                     if attempt < max_attempts:
                         await asyncio.sleep(retry_secs)
                     continue
@@ -1057,7 +1119,11 @@ class TradingEngine:
                 order["note"] = f"LIVE filled @ {order['fill_price']} (order {broker_id})"
                 return True
             if "reject" in s or "cancel" in s:
-                order["note"] = f"Broker {s}: {st.get('text', '')}"
+                txt = st.get('text', '') or ''
+                order["note"] = f"Broker {s}: {txt}"
+                if any(k in txt.lower() for k in ("insufficient", "margin", "funds")):
+                    order["note"] = f"Broker {s} (margin) — not retrying: {txt}"
+                    break   # margin shortfall — stop re-placing / hammering
                 broker_id = None                               # place fresh next attempt
             else:
                 order["note"] = f"LIVE working/unfilled - re-pricing, attempt {attempt}/{max_attempts}"

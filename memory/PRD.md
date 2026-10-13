@@ -467,6 +467,27 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
   * Utility backend/pull_candles.py: one-time standalone Angel history pull (REST only, no websocket),
     reads creds from .env, caches candles to /app/memory for local sims (avoids reconnecting the live session).
 
+- 2026-10-13 — SAFETY FIX (user request): PRE-TRADE RECONCILE + MARGIN CHECK. Requires DEPLOY.
+  * WHY: real-money incident — bot position qty drifted to 130 while Angel held 65 (a phantom/untracked
+    lot, same 22,293 short family; preview's saved state ALSO holds SHORT 65 @ 22293 -> likely origin =
+    preview on the shared Angel login). Bot "trusted the broker's size" and exited 130 against a 65 short,
+    accidentally flipping to LONG; then fired 3 long entries rejected for Insufficient Funds (5 attempts
+    each = order hammering). Ruled out: manual trades (user: no), production split-brain (0 SKIPPED_DUPLICATE).
+  * FIX A (engine._execute_order, before placing any order): query broker.get_net_position and —
+    ENTRY: if broker netqty != 0 -> SKIPPED_MISMATCH + alert (never stack onto an untracked lot).
+    EXIT: if broker flat -> SKIPPED_FLAT + clear position; if broker side != bot side -> SKIPPED_MISMATCH
+    + block; else resize exit qty to the broker's ACTUAL netqty (never over-/under-exit a phantom size).
+    On get_net_position failure (found=False) -> fall through to normal behaviour (never freeze the bot).
+  * FIX B: pre-trade margin check — broker.get_available_funds() (new, via SmartAPI rmsLimit); if
+    available < ref_price*qty*margin_fraction (new setting, default 0.25) -> SKIPPED_MARGIN + alert (skip,
+    don't place). Plus _live_fill now BREAKS immediately on an insufficient-funds/margin rejection
+    (placement AND order-status paths) instead of retrying max_attempts -> stops rejected-order hammering.
+  * FILES: backend/angel_broker.py (get_available_funds), backend/engine.py (_execute_order reconcile+margin
+    block, _live_fill margin-break x2, settings.margin_fraction). Tests: +7 -> 46 pass.
+  * TODO USER: DEPLOY to activate on production. Keep PREVIEW fully stopped/disconnected (shared Angel login).
+  * NOT done this round (deferred): durable order journal / orphan-fill recovery, hard single-session lock.
+
+
 - 2026-08-26 — UI FIX: hardcoded "Waiting for 2 red/2 green bricks" label:
   * Backend entry_bricks was correctly 1, but OpenPositionPanel.jsx + DashboardDialogs.jsx had the
     brick count hardcoded to "2" -> misleading (user thought entry was still 2-brick).
