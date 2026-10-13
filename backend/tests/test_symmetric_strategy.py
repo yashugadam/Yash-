@@ -321,9 +321,8 @@ def test_gap_flip_honors_entry_bricks():
 
 
 # ---------------------------------------------------------------- exit sizing (reconciled/adopted)
-def test_exit_order_sizes_to_actual_position_qty():
-    """A reconciled/adopted position larger than one lot (e.g. 130) must be exited in FULL,
-    not just lot_size, or a naked remainder is left behind."""
+def test_exit_order_never_exceeds_bot_lot():
+    """A stale bot state of 130 must never fire a 130-qty order — exits are capped to lot_size."""
     async def scenario():
         eng = _fresh()
         eng.price = 100.0
@@ -335,8 +334,7 @@ def test_exit_order_sizes_to_actual_position_qty():
                 st.enter_context(p)
             await eng._execute_order("BUY", "EXIT", 100.0, 5)
         exit_orders = [o for o in eng.orders if o["kind"] == "EXIT"]
-        assert exit_orders and exit_orders[0]["qty"] == 130
-        assert eng.position is None
+        assert exit_orders and exit_orders[0]["qty"] == 65
     asyncio.run(scenario())
 
 
@@ -793,4 +791,75 @@ def test_live_fill_stops_hammering_on_margin_reject():
         filled = await eng._live_fill(order, "SELL", 5, 10, 5, 5, 21990, 22010)
         assert filled is False
         assert order["attempts"] == 1            # broke on the first attempt, no hammering
+    asyncio.run(scenario())
+
+
+# ------------------------------------------- qty cap to bot lot + gap-flip position-book lag
+def test_exit_with_double_broker_qty_trades_only_bot_lot():
+    """Broker net = 2x lot while bot holds 1 lot -> exit order is the bot's 65, never 130."""
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -130, "avgprice": 22400})
+        eng.position = {"side": "SHORT", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        with patch.object(eng, "_live_fill", side_effect=_fill_ok):
+            await eng._execute_order("BUY", "EXIT", 22000.0, 6)
+        assert eng.orders[0]["qty"] == 65
+        assert "left untouched" in eng.alert["msg"]
+    asyncio.run(scenario())
+
+
+def test_auto_sync_adopts_only_bot_lot_of_oversized_broker_qty():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": -130, "avgprice": 22300})
+        await eng._execute_order("SELL", "ENTRY", 22000.0, 5)
+        assert eng.orders[0]["status"] == "AUTO_SYNCED"
+        assert eng.position["side"] == "SHORT" and eng.position["qty"] == 65
+        eng.broker.place_limit_order.assert_not_called()
+    asyncio.run(scenario())
+
+
+def test_takeover_caps_adopted_qty_to_lot():
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 130, "avgprice": 22300})
+        eng.broker.fut_token = "111"
+        await eng._reconcile_on_takeover()
+        assert eng.position["side"] == "LONG" and eng.position["qty"] == 65
+    asyncio.run(scenario())
+
+
+def test_gap_flip_rechecks_lagging_position_book_and_flips():
+    """Exit fills but Angel still shows the old LONG on the first read -> GAP_FLIP re-reads,
+    sees flat, and opens the SHORT (does NOT re-adopt the just-closed LONG)."""
+    async def scenario():
+        eng = _exec_engine(None)
+        eng._flip_recheck_delay = 0
+        eng.broker.get_net_position = MagicMock(side_effect=[
+            {"found": True, "netqty": 65, "avgprice": 22400},   # EXIT pre-trade reconcile (real LONG)
+            {"found": True, "netqty": 65, "avgprice": 22400},   # GAP_FLIP first read — stale
+            {"found": True, "netqty": 0, "avgprice": None},     # re-read — flat
+        ])
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        eng.consec_red = 2
+        with patch.object(eng, "_live_fill", side_effect=_fill_ok), \
+             patch.object(eng, "_entries_blocked", return_value=False):
+            await eng._execute_order("SELL", "EXIT", 22000.0, 6)
+        assert eng.position is not None and eng.position["side"] == "SHORT"
+        assert not any(o["status"] == "AUTO_SYNCED" for o in eng.orders)
+    asyncio.run(scenario())
+
+
+def test_gap_flip_adopts_if_old_side_persists_after_rechecks():
+    """If Angel keeps showing the old side after all re-reads it is treated as real and adopted."""
+    async def scenario():
+        eng = _exec_engine({"found": True, "netqty": 65, "avgprice": 22400})
+        eng._flip_recheck_delay = 0
+        eng.position = {"side": "LONG", "qty": 65, "entry_price": 22400.0, "entry_time": "t",
+                        "entry_order_id": "x", "reds_at_entry": 2, "unrealized_pnl": 0.0}
+        eng.consec_red = 2
+        with patch.object(eng, "_live_fill", side_effect=_fill_ok), \
+             patch.object(eng, "_entries_blocked", return_value=False):
+            await eng._execute_order("SELL", "EXIT", 22000.0, 6)
+        assert eng.orders[0]["status"] == "AUTO_SYNCED" and eng.position["side"] == "LONG"
+        assert eng.broker.get_net_position.call_count == 2 + eng._flip_rechecks
     asyncio.run(scenario())

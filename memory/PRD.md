@@ -518,3 +518,9 @@ carry-forward. **Symmetric long+short strategy (updated 2026-07-10):**
     brick count hardcoded to "2" -> misleading (user thought entry was still 2-brick).
   * Made both dynamic (reads state.settings.entry_bricks, with singular/plural). Verified on preview:
     shows "Waiting for 1 red (short) or 1 green (long) brick". Frontend change -> REQUIRES REDEPLOY.
+
+## 2026-06 — Code-review fixes (HIGH + MEDIUM)
+- HIGH: bot never trades more than its configured lot_size. `_capped_qty()` caps qty in auto-sync adoption, EXIT resize, exit order sizing, takeover reconcile and manual reconcile (reexit/accept). Excess broker qty is left untouched + warning alert (`_excess_note`).
+- MEDIUM: GAP_FLIP lag guard — if Angel still shows the just-exited side, re-read position up to `_flip_rechecks`=3 × 1.5s; flips if flat, adopts only if the old side persists (treated as real).
+- Tests: 52 passing in tests/test_symmetric_strategy.py (5 new). Minor review items (margin_fraction API) intentionally skipped by user.
+- Needs production redeploy to take effect.

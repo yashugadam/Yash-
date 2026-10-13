@@ -113,6 +113,8 @@ class TradingEngine:
         self._last_exit_retry = 0.0                    # epoch of last auto exit-retry
         self._last_reject_note = ""                    # last broker rejection reason (for alerts)
         self._disc_flagged = False                     # True while a DISCONNECTED-pause alert is active
+        self._flip_rechecks = 3                        # gap-flip: re-reads of a lagging Angel position book
+        self._flip_recheck_delay = 1.5                 # seconds between those re-reads
 
     # -------- renko construction (Traditional Renko, close-based, like TradingView) --------
     # A brick is evaluated only on each bar CLOSE. Continuation needs a 1x brick move;
@@ -910,8 +912,9 @@ class TradingEngine:
             # carry-forward position may be more than one lot, so exiting only lot_size would
             # leave a naked remainder (bot thinks flat while the broker still holds qty).
             # ENTRY orders are always exactly one lot. Never exceed the hard safety cap.
+            # Never trade more than the bot's own configured lot, even if a stale state says more.
             order_qty = self.settings["lot_size"] if kind == "ENTRY" \
-                else int(self.position["qty"])
+                else min(int(self.position["qty"]), int(self.settings["lot_size"]))
             order_qty = max(1, min(int(order_qty), MAX_ORDER_QTY))
 
             base = self.settings["buffer_points"]
@@ -960,6 +963,17 @@ class TradingEngine:
             npos = await asyncio.to_thread(self.broker.get_net_position)
             if npos.get("found"):
                 bqty = int(npos.get("netqty", 0))
+                # GAP-FLIP lag guard: right after an exit fills, Angel's position book can still
+                # show the side we just closed. Re-read before treating it as a real position.
+                if kind == "ENTRY" and reason == "GAP_FLIP" and bqty != 0 \
+                        and ("SHORT" if bqty < 0 else "LONG") != self._entry_side:
+                    for _ in range(self._flip_rechecks):
+                        await asyncio.sleep(self._flip_recheck_delay)
+                        n2 = await asyncio.to_thread(self.broker.get_net_position)
+                        if n2.get("found"):
+                            npos, bqty = n2, int(n2.get("netqty", 0))
+                            if bqty == 0 or ("SHORT" if bqty < 0 else "LONG") == self._entry_side:
+                                break
                 if kind == "ENTRY":
                     if bqty != 0:
                         bside = "SHORT" if bqty < 0 else "LONG"
@@ -969,8 +983,10 @@ class TradingEngine:
                             order["status"] = "AUTO_SYNCED"
                             order["note"] = (f"Entry skipped & AUTO-SYNCED to Angel's real {bside} "
                                              f"{abs(bqty)} qty @ {npos.get('avgprice')}; bot now manages it.")
-                            self._set_alert(f"Auto-synced to Angel's real {bside} {abs(bqty)} position — "
-                                            f"bot is now managing it (exits on the next opposite brick).", "info")
+                            self._set_alert(f"Auto-synced to Angel's real {bside} position — bot is now "
+                                            f"managing {self.position['qty']} qty (exits on the next "
+                                            f"opposite brick).{self._excess_note(bqty)}",
+                                            "warning" if self._excess_note(bqty) else "info")
                         else:
                             order["status"] = "SKIPPED_MISMATCH"
                             order["note"] = (f"Entry skipped — Angel shows untracked {bside} {abs(bqty)}; "
@@ -1012,7 +1028,9 @@ class TradingEngine:
                             order["note"] = (f"Exit skipped & AUTO-SYNCED: bot thought {old_side} but Angel "
                                              f"shows {bside} {abs(bqty)}; adopted the real position.")
                             self._set_alert(f"Auto-synced — bot thought {old_side} but Angel shows "
-                                            f"{bside} {abs(bqty)}; adopted the real position.", "info")
+                                            f"{bside}; now managing {self.position['qty']} qty."
+                                            f"{self._excess_note(bqty)}",
+                                            "warning" if self._excess_note(bqty) else "info")
                         else:
                             order["status"] = "SKIPPED_MISMATCH"
                             order["note"] = (f"Exit blocked — Angel shows {bside} {abs(bqty)} but bot holds "
@@ -1022,11 +1040,15 @@ class TradingEngine:
                         asyncio.create_task(self._save_order(order)); asyncio.create_task(self._persist_state())
                         return
                     # size the exit to the broker's ACTUAL qty so we never over-/under-exit a phantom size
-                    real_qty = max(1, min(abs(bqty), MAX_ORDER_QTY))
-                    if real_qty != int(order["qty"]):
+                    # ...but never more than the bot's own lot (don't close another env's/manual qty)
+                    real_qty = self._capped_qty(bqty)
+                    if self._excess_note(bqty):
+                        self._set_alert(f"Exiting only the bot's {real_qty} qty.{self._excess_note(bqty)}",
+                                        "warning")
+                    elif real_qty != int(order["qty"]):
                         self._set_alert(f"Exit size corrected to Angel's real {real_qty} qty "
                                         f"(bot thought {order['qty']}).", "info")
-                        order["qty"] = real_qty
+                    order["qty"] = real_qty
 
             # Idempotency: persist a deterministic client order id BEFORE the broker call.
             # If it already exists (a leader-failover race placed it), suppress the duplicate.
@@ -1098,16 +1120,27 @@ class TradingEngine:
         self._alert_ts = time.time()
         logger.warning("ALERT(%s): %s", level, msg)
 
+    def _capped_qty(self, broker_qty):
+        """Qty the bot may manage from Angel's net qty: never more than its own configured lot."""
+        return max(1, min(abs(int(broker_qty)), int(self.settings["lot_size"]), MAX_ORDER_QTY))
+
+    def _excess_note(self, broker_qty):
+        real, lot = abs(int(broker_qty)), int(self.settings["lot_size"])
+        if real <= lot:
+            return ""
+        return (f" Angel shows {real} qty (more than the bot's {lot} lot) — the extra {real - lot} "
+                f"is left untouched; check Angel One.")
+
     def _adopt_broker_position(self, npos, source="AUTO_SYNC"):
-        """Set the bot's position to match Angel's real net position (side/qty/avg) so a desync
-        self-heals autonomously — the bot then manages the real position per strategy."""
+        """Set the bot's position to match Angel's real net position (side/avg, qty capped to the
+        bot's lot) so a desync self-heals autonomously — the bot then manages it per strategy."""
         bqty = int(npos.get("netqty", 0))
         if bqty == 0:
             self.position = None
             return None
         side = "LONG" if bqty > 0 else "SHORT"
         self.position = {
-            "side": side, "qty": abs(bqty),
+            "side": side, "qty": self._capped_qty(bqty),
             "entry_price": npos.get("avgprice") or self.price,
             "entry_time": now_iso(), "entry_order_id": source,
             "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
@@ -1223,6 +1256,7 @@ class TradingEngine:
             if qty == 0:
                 return {"ok": False, "message": "Angel One shows no open position to exit."}
             side = "SHORT" if netqty < 0 else "LONG"
+            qty = self._capped_qty(netqty)
             self.position = {
                 "side": side, "qty": qty, "entry_price": np.get("avgprice") or self.price,
                 "entry_time": now_iso(), "entry_order_id": "RECONCILE",
@@ -1231,7 +1265,7 @@ class TradingEngine:
             self.pending_exit = False
             self._force_exit("RECONCILE_REEXIT")
             await self._persist_state()
-            return {"ok": True, "message": "Exit order placed to flatten the broker position."}
+            return {"ok": True, "message": f"Exit order placed for {qty} qty.{self._excess_note(netqty)}"}
         if action == "accept":
             # Accept Angel One as the source of truth and SYNC the bot to it, so the
             # mismatch is genuinely resolved (otherwise the warning just recomputes).
@@ -1251,13 +1285,15 @@ class TradingEngine:
                         "(the broker already closed the position)."}
             # broker holds a position -> adopt it so the bot manages/exits it per strategy
             side = "SHORT" if netqty < 0 else "LONG"
+            qty = self._capped_qty(netqty)
             self.position = {
                 "side": side, "qty": qty, "entry_price": np.get("avgprice") or self.price,
                 "entry_time": now_iso(), "entry_order_id": "RECONCILE_ADOPT",
                 "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0,
             }
             await self._persist_state()
-            return {"ok": True, "message": f"Synced — adopted Angel One's open {side} ({qty} qty) into the bot."}
+            return {"ok": True, "message": f"Synced — adopted Angel One's open {side} ({qty} qty) into the bot."
+                                           f"{self._excess_note(netqty)}"}
         return {"ok": False, "message": "Unknown action."}
 
     async def manual_order(self, side, qty=None):
@@ -1959,19 +1995,23 @@ class TradingEngine:
             elif (not self.position) and broker_qty != 0:
                 # broker holds a position we lost track of -> adopt it so the strategy manages the exit
                 side = "SHORT" if broker_qty < 0 else "LONG"
-                self.position = {"side": side, "qty": abs(broker_qty),
+                self.position = {"side": side, "qty": self._capped_qty(broker_qty),
                                  "entry_price": np.get("avgprice") or self.price,
                                  "entry_time": now_iso(), "entry_order_id": "TAKEOVER_ADOPT",
                                  "reds_at_entry": self.down_run_reds or 2, "unrealized_pnl": 0.0}
-                logger.warning("TAKEOVER: adopted untracked broker %s (%d qty)", side, abs(broker_qty))
+                logger.warning("TAKEOVER: adopted untracked broker %s (%d of %d qty)", side,
+                               self.position["qty"], abs(broker_qty))
             elif self.position and broker_qty != 0:
-                self.position["qty"] = abs(broker_qty)   # trust the broker's size
+                self.position["qty"] = self._capped_qty(broker_qty)   # broker size, capped to the bot's lot
                 # if an exit/square-off was in progress, keep retrying it under the new leader
                 if self.forced_exit_pending or self.exit_retry_pending or \
                         self.squared_off_date == str(datetime.now(IST).date()):
                     self.exit_retry_pending = True
                     logger.warning("TAKEOVER: %s still open with exit pending -> re-arming exit",
                                    self.position.get("side"))
+            if broker_qty and self._excess_note(broker_qty):
+                self._set_alert(f"Takeover sync.{self._excess_note(broker_qty)}", "warning")
+
             await self._persist_state()
         except Exception as e:
             logger.exception("takeover reconcile failed: %s", e)
